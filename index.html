@@ -118,6 +118,8 @@
       <button id="modeGrid">Zoomタイル</button>
     </div>
     <button id="btnAdd">＋ 手動で四角を追加</button>
+    <button id="btnPaint">🖌 指でなぞって塗る</button>
+    <div class="slider-wrap" id="brushWrap" style="display:none;">太さ<input type="range" id="brushSize" min="10" max="150" value="40"></div>
     <button id="btnRedetect">再検出</button>
     <div class="seg" role="group" aria-label="加工の種類">
       <button id="effBlur" class="on">ぼかし</button>
@@ -160,6 +162,9 @@
   let addMode = false;
   let drawing = null;             // 追加モードのドラッグ中矩形
   let interaction = null;         // 手動枠の移動/リサイズ中の状態
+  let paintMode = false;
+  let brushSize = 40;
+  let paintStroke = null;         // 塗りモードでドラッグ中のストローク{points:[{x,y}...]}
   let modelsReady = false;
   let rawDetections = [];         // 検出した生の顔ボックス(範囲切替用)
   let autoMode = 'face';          // 'face' | 'grid'
@@ -208,6 +213,8 @@
     source = off;
     cv.width = off.width; cv.height = off.height;
     regions = []; rawDetections = []; gridTiles = [];
+    brushSize = Math.round(Math.min(off.width, off.height) * 0.14);
+    $('brushSize').value = brushSize;
     dz.style.display = 'none';
     $('toolbar').style.display = 'flex';
     $('stage').style.display = 'flex';
@@ -406,6 +413,7 @@
 
   // ---------- 描画 ----------
   function drawEffect(r){
+    if (r.freehand){ drawFreehandEffect(r); return; }
     const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h);
     if (w < 2 || h < 2) return;
     if (effect === 'blur' && filterSupported){
@@ -426,6 +434,87 @@
       ctx.drawImage(off, 0, 0, sw, sh, x, y, w, h);
       ctx.imageSmoothingEnabled = true;
     }
+  }
+
+  // フリーハンド塗り: 加工済み(ぼかし/モザイク)の画像全体を1回だけ作り、
+  // ストロークの形でパターン塗りすることで、四角に頼らず自然な範囲を塗れるようにする。
+  // (1回作った画像はrenderPass単位で使い回すので、ストロークが増えても重くならない)
+  let effCanvasCache = null;
+  function getFullEffectCanvas(){
+    if (effCanvasCache) return effCanvasCache;
+    const eff = drawFreehandEffect._eff || (drawFreehandEffect._eff = document.createElement('canvas'));
+    eff.width = source.width; eff.height = source.height;
+    const ectx = eff.getContext('2d');
+    ectx.clearRect(0, 0, eff.width, eff.height);
+    if (effect === 'blur' && filterSupported){
+      ectx.filter = `blur(${strength}px)`;
+      ectx.drawImage(source, 0, 0);
+      ectx.filter = 'none';
+    } else {
+      const block = Math.max(4, strength);
+      const sw = Math.max(1, Math.round(source.width / block)), sh = Math.max(1, Math.round(source.height / block));
+      const off = drawFreehandEffect._off || (drawFreehandEffect._off = document.createElement('canvas'));
+      off.width = sw; off.height = sh;
+      const octx = off.getContext('2d');
+      octx.imageSmoothingEnabled = true;
+      octx.drawImage(source, 0, 0, sw, sh);
+      ectx.imageSmoothingEnabled = false;
+      ectx.drawImage(off, 0, 0, sw, sh, 0, 0, eff.width, eff.height);
+      ectx.imageSmoothingEnabled = true;
+    }
+    effCanvasCache = eff;
+    return eff;
+  }
+
+  function strokePathFor(ctxTarget, points){
+    ctxTarget.beginPath();
+    if (points.length === 1){
+      ctxTarget.moveTo(points[0].x, points[0].y);
+      ctxTarget.lineTo(points[0].x + 0.01, points[0].y);
+    } else {
+      ctxTarget.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctxTarget.lineTo(points[i].x, points[i].y);
+    }
+  }
+
+  function drawFreehandEffect(r){
+    if (!r.points || r.points.length === 0) return;
+    const eff = getFullEffectCanvas();
+    ctx.save();
+    strokePathFor(ctx, r.points);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = r.brush;
+    ctx.strokeStyle = ctx.createPattern(eff, 'no-repeat');
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 点からポリライン(ストローク)までの最短距離。タップ/ドラッグ判定に使う。
+  function distToSegment(px, py, ax, ay, bx, by){
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq > 0 ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    return Math.hypot(px - cx, py - cy);
+  }
+  function distToPolyline(px, py, points){
+    if (points.length === 1) return Math.hypot(px - points[0].x, py - points[0].y);
+    let min = Infinity;
+    for (let i = 1; i < points.length; i++){
+      min = Math.min(min, distToSegment(px, py, points[i-1].x, points[i-1].y, points[i].x, points[i].y));
+    }
+    return min;
+  }
+  function freehandBounds(r){
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    for (const p of r.points){
+      minX=Math.min(minX,p.x); minY=Math.min(minY,p.y);
+      maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y);
+    }
+    const pad = r.brush/2;
+    return { x:minX-pad, y:minY-pad, w:(maxX-minX)+pad*2, h:(maxY-minY)+pad*2 };
   }
 
   function handleSize(){
@@ -457,6 +546,7 @@
 
   function render(showGuides = true){
     if (!source) return;
+    effCanvasCache = null; // ぼかし/モザイクの元画像はrenderのたびに作り直す(強さ変更などに追従するため)
     ctx.clearRect(0, 0, cv.width, cv.height);
     ctx.drawImage(source, 0, 0);
     for (const r of regions){ if (r.active) drawEffect(r); }
@@ -467,10 +557,48 @@
       ctx.strokeRect(drawing.x, drawing.y, drawing.w, drawing.h);
       ctx.restore();
     }
+    if (paintStroke && paintStroke.points.length > 0){
+      ctx.save();
+      strokePathFor(ctx, paintStroke.points);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = brushSize;
+      ctx.strokeStyle = 'rgba(245,138,124,.55)';
+      ctx.stroke();
+      ctx.restore();
+    }
     if (!showGuides) return;
 
     const hs = handleSize();
     for (const r of regions){
+      if (r.freehand){
+        ctx.save();
+        strokePathFor(ctx, r.points);
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.lineWidth = r.brush;
+        if (r.active){ ctx.strokeStyle = 'rgba(245,138,124,.5)'; ctx.setLineDash([]); }
+        else { ctx.strokeStyle = 'rgba(126,210,180,.6)'; ctx.setLineDash([]); }
+        ctx.stroke();
+        ctx.lineWidth = Math.max(2, hs / 9);
+        ctx.strokeStyle = r.active ? 'rgba(245,138,124,.95)' : 'rgba(126,210,180,.95)';
+        ctx.setLineDash(r.active ? [10, 7] : []);
+        ctx.stroke();
+        ctx.restore();
+
+        const b = freehandBounds(r);
+        const bx = b.x + b.w - hs, by = b.y;
+        ctx.save();
+        ctx.fillStyle = 'rgba(23,24,28,.85)';
+        ctx.fillRect(bx, by, hs, hs);
+        ctx.strokeStyle = 'rgba(244,242,237,.8)'; ctx.lineWidth = Math.max(1.5, hs / 12);
+        const pad = hs * 0.28;
+        ctx.beginPath();
+        ctx.moveTo(bx + pad, by + pad); ctx.lineTo(bx + hs - pad, by + hs - pad);
+        ctx.moveTo(bx + hs - pad, by + pad); ctx.lineTo(bx + pad, by + hs - pad);
+        ctx.stroke();
+        ctx.restore();
+        continue;
+      }
+
       ctx.save();
       ctx.lineWidth = Math.max(2, hs / 9);
       if (r.active){ ctx.strokeStyle = 'rgba(245,138,124,.95)'; ctx.setLineDash([10, 7]); }
@@ -521,6 +649,11 @@
       cv.setPointerCapture(e.pointerId);
       return;
     }
+    if (paintMode){
+      paintStroke = { points: [{ x:p.x, y:p.y }] };
+      cv.setPointerCapture(e.pointerId);
+      return;
+    }
     const hs = handleSize();
     for (let i = regions.length - 1; i >= 0; i--){
       const r = regions[i];
@@ -529,6 +662,23 @@
           r.active = !r.active;
           setStatus(r.active ? 'ぼかしをかけました。' : 'ぼかしを外しました。');
           render();
+          return;
+        }
+        continue;
+      }
+      if (r.freehand){
+        // フリーハンド枠: 削除ボタン(右上、外接矩形基準) → 線に触れていれば移動/タップの順に判定
+        const b = freehandBounds(r);
+        const trX = b.x + b.w - hs, trY = b.y;
+        if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
+          regions.splice(i, 1);
+          setStatus('手動の枠を削除しました。');
+          render();
+          return;
+        }
+        if (distToPolyline(p.x, p.y, r.points) <= r.brush / 2){
+          interaction = { type:'moveFreehand', region:r, startX:p.x, startY:p.y, origPoints:r.points.map(pt => ({...pt})), moved:false };
+          cv.setPointerCapture(e.pointerId);
           return;
         }
         continue;
@@ -570,6 +720,12 @@
       render();
       return;
     }
+    if (paintStroke){
+      const pts = paintStroke.points;
+      const last = pts[pts.length - 1];
+      if (Math.hypot(p.x - last.x, p.y - last.y) >= 2){ pts.push({ x:p.x, y:p.y }); render(); }
+      return;
+    }
     if (!interaction) return;
     if (interaction.type === 'move'){
       const dx = p.x - interaction.startX, dy = p.y - interaction.startY;
@@ -577,6 +733,10 @@
       const region = interaction.region;
       region.x = Math.max(0, Math.min(source.width - region.w, interaction.orig.x + dx));
       region.y = Math.max(0, Math.min(source.height - region.h, interaction.orig.y + dy));
+    } else if (interaction.type === 'moveFreehand'){
+      const dx = p.x - interaction.startX, dy = p.y - interaction.startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) interaction.moved = true;
+      interaction.region.points = interaction.origPoints.map(pt => ({ x: pt.x + dx, y: pt.y + dy }));
     } else if (interaction.type === 'resize'){
       applyResize(interaction.region, interaction.handle, interaction.orig, p.x, p.y);
     }
@@ -593,8 +753,15 @@
       render();
       return;
     }
+    if (paintStroke){
+      regions.push({ points:paintStroke.points, brush:brushSize, active:true, manual:true, freehand:true });
+      setStatus('塗った部分にぼかしを追加しました。続けて他の場所も塗れます。終わったら「指でなぞって塗る」を押すと解除されます。');
+      paintStroke = null;
+      render();
+      return;
+    }
     if (interaction){
-      if (interaction.type === 'move'){
+      if (interaction.type === 'move' || interaction.type === 'moveFreehand'){
         if (!interaction.moved){
           interaction.region.active = !interaction.region.active;
           setStatus(interaction.region.active ? 'ぼかしをかけました。' : 'ぼかしを外しました。');
@@ -612,13 +779,26 @@
   // ---------- ツールバー ----------
   function setAddMode(on){
     addMode = on;
+    if (on) setPaintMode(false);
     $('btnAdd').classList.toggle('active-mode', on);
     $('btnAdd').textContent = on ? 'ドラッグで範囲を指定…' : '＋ 手動で四角を追加';
-    cv.style.touchAction = on ? 'none' : 'manipulation';
+    cv.style.touchAction = (on || paintMode) ? 'none' : 'manipulation';
     cv.style.cursor = on ? 'crosshair' : 'pointer';
     if (on) setStatus('隠したい範囲を、指(マウス)を押したまま囲むようにドラッグしてください。');
   }
+  function setPaintMode(on){
+    paintMode = on;
+    if (on) setAddMode(false);
+    $('btnPaint').classList.toggle('active-mode', on);
+    $('btnPaint').textContent = on ? '指でなぞって塗る中…' : '🖌 指でなぞって塗る';
+    $('brushWrap').style.display = on ? 'flex' : 'none';
+    cv.style.touchAction = (on || addMode) ? 'none' : 'manipulation';
+    cv.style.cursor = on ? 'crosshair' : 'pointer';
+    if (on) setStatus('隠したい部分を、指(マウス)を押したままなぞってください。');
+  }
   $('btnAdd').addEventListener('click', () => setAddMode(!addMode));
+  $('btnPaint').addEventListener('click', () => setPaintMode(!paintMode));
+  $('brushSize').addEventListener('input', e => { brushSize = +e.target.value; });
   $('btnRedetect').addEventListener('click', () => {
     if (autoMode === 'grid'){
       const grid = detectZoomGrid(source);
@@ -688,10 +868,11 @@
   $('strength').addEventListener('input', e => { strength = +e.target.value; render(); });
 
   $('btnReset').addEventListener('click', () => {
-    source = null; regions = []; rawDetections = []; gridTiles = []; drawing = null;
+    source = null; regions = []; rawDetections = []; gridTiles = []; drawing = null; paintStroke = null;
     autoMode = 'face';
     setModeButtons();
     setAddMode(false);
+    setPaintMode(false);
     dz.style.display = 'block';
     $('toolbar').style.display = 'none';
     $('stage').style.display = 'none';
