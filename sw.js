@@ -24,17 +24,15 @@ self.addEventListener('activate', event => {
   );
 });
 
-// キャッシュ優先(オフラインでも動くように)。無ければネットワークから取得してキャッシュに追加する。
+// ネットワーク優先: オンラインなら常に最新版を取得し、キャッシュも更新する。
+// オフラインの時だけキャッシュにフォールバックする(更新後も古い版が残り続けるのを防ぐため)。
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   event.respondWith(
-    caches.match(event.request).then(cached => {
-      if (cached) return cached;
-      return fetch(event.request).then(res => {
-        const copy = res.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
-        return res;
-      });
-    })
+    fetch(event.request).then(res => {
+      const copy = res.clone();
+      caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+      return res;
+    }).catch(() => caches.match(event.request))
   );
 });

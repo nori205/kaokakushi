@@ -617,6 +617,7 @@
     $('btnAdd').textContent = on ? 'ドラッグで範囲を指定…' : '＋ 手動で四角を追加';
     cv.style.touchAction = on ? 'none' : 'manipulation';
     cv.style.cursor = on ? 'crosshair' : 'pointer';
+    if (on) setStatus('隠したい範囲を、指(マウス)を押したまま囲むようにドラッグしてください。');
   }
   $('btnAdd').addEventListener('click', () => setAddMode(!addMode));
   $('btnRedetect').addEventListener('click', () => {
