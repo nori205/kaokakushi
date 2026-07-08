@@ -416,8 +416,11 @@
   // 角がくっきりした"モザイク"になる)。iOS Safariのctx.filter(blur)は
   // clipとの組み合わせで描画範囲が透明になったり、画像が大きいと無反応になったりする
   // 既知の不具合があるため、canvasの拡大縮小だけで完結するこの方式に統一している。
+  // ぼかしも縮小率をモザイクと同じスケールにする(上限まで強くしたときに
+  // 顔がわからなくなる程度まで潰す)。ぼかしとモザイクの見た目の違いは
+  // 拡大時の補間の有無だけで作る(補間ありなら滑らか、補間なしならブロック状)。
   function effectBlock(){
-    return effect === 'blur' ? Math.max(1.5, strength / 3) : Math.max(4, strength);
+    return Math.max(4, strength);
   }
 
   function drawEffect(r){
@@ -875,14 +878,36 @@
     fi.value = '';
   });
 
+  // iOS Safariは<a download>で作った画像を「ファイル」アプリのダウンロード欄に
+  // 保存してしまい、Androidのように「写真」アプリへは入らない。iOSでは代わりに
+  // Web Share APIで共有シートを開き、「画像を保存」から写真アプリに保存してもらう。
+  const isIOS = /iP(hone|od|ad)/.test(navigator.platform) ||
+    (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1);
+
   $('btnSave').addEventListener('click', () => {
     if (!source) return;
     render(false); // ガイド線なしで描き直し
-    cv.toBlob(blob => {
-      const a = document.createElement('a');
+    cv.toBlob(async blob => {
       const d = new Date();
       const pad = n => String(n).padStart(2, '0');
-      a.download = `kaokakushi_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.png`;
+      const filename = `kaokakushi_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.png`;
+
+      if (isIOS && navigator.canShare && navigator.share){
+        const file = new File([blob], filename, { type:'image/png' });
+        if (navigator.canShare({ files:[file] })){
+          try {
+            await navigator.share({ files:[file] });
+            setStatus('共有画面が閉じたら完了です。「画像を保存」を選ぶと写真アプリに保存されます。');
+          } catch(e){
+            // ユーザーが共有をキャンセルした場合など。何もしない。
+          }
+          render(true);
+          return;
+        }
+      }
+
+      const a = document.createElement('a');
+      a.download = filename;
       a.href = URL.createObjectURL(blob);
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
