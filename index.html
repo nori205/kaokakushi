@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>かおかくし | タップで選ぶ顔ぼかしツール</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#17181C">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<script src="vendor/face-api.min.js"></script>
+<style>
+  :root{
+    --bg:#17181C; --surface:#22242B; --border:#34363F;
+    --text:#F4F2ED; --sub:#9C9FA9;
+    --accent:#F58A7C; --reveal:#7ED2B4;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:"Hiragino Maru Gothic ProN","Hiragino Kaku Gothic ProN","Yu Gothic Medium","Yu Gothic",sans-serif;
+    min-height:100vh; display:flex; flex-direction:column; align-items:center;
+    padding:20px 14px 40px;
+  }
+  header{width:100%; max-width:860px; margin-bottom:18px;}
+  h1{font-size:1.35rem; letter-spacing:.06em;}
+  h1 .dot{color:var(--accent);}
+  .tagline{color:var(--sub); font-size:.85rem; margin-top:4px;}
+
+  main{width:100%; max-width:860px; display:flex; flex-direction:column; gap:14px;}
+
+  /* --- アップロード画面 --- */
+  #dropzone{
+    border:2px dashed var(--border); border-radius:20px;
+    background:var(--surface);
+    padding:56px 20px; text-align:center; cursor:pointer;
+    transition:border-color .2s, background .2s;
+  }
+  #dropzone.dragover{border-color:var(--accent); background:#2a2226;}
+  #dropzone .glyph{
+    display:inline-grid; grid-template-columns:repeat(2,34px); gap:6px; margin-bottom:18px;
+  }
+  #dropzone .glyph span{
+    width:34px; height:26px; border-radius:6px; background:#3a3d47; filter:blur(0);
+  }
+  #dropzone .glyph span.blur{filter:blur(3px); background:#4a4048;}
+  #dropzone p.big{font-size:1.02rem; margin-bottom:6px;}
+  #dropzone p.small{color:var(--sub); font-size:.8rem; line-height:1.7;}
+  #fileInput{display:none;}
+
+  /* --- ツールバー --- */
+  #toolbar{
+    display:none; flex-wrap:wrap; gap:8px; align-items:center;
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:16px; padding:10px 12px;
+  }
+  button{
+    font-family:inherit; font-size:.83rem; letter-spacing:.03em;
+    color:var(--text); background:#2c2e37; border:1px solid var(--border);
+    border-radius:999px; padding:8px 14px; cursor:pointer;
+    transition:background .15s, border-color .15s;
+  }
+  button:hover{background:#343744;}
+  button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#241512; font-weight:700;}
+  button.primary:hover{background:#f79c90;}
+  button.active-mode{border-color:var(--accent); color:var(--accent); background:#2e2527;}
+  .seg{display:flex; border:1px solid var(--border); border-radius:999px; overflow:hidden;}
+  .seg button{border:none; border-radius:0; padding:8px 12px;}
+  .seg button.on{background:var(--accent); color:#241512; font-weight:700;}
+  .slider-wrap{display:flex; align-items:center; gap:6px; font-size:.78rem; color:var(--sub);}
+  input[type=range]{accent-color:var(--accent); width:110px;}
+  .spacer{flex:1;}
+
+  /* --- キャンバス --- */
+  #stage{display:none; flex-direction:column; gap:10px;}
+  #canvasWrap{
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:16px; padding:10px; display:flex; justify-content:center;
+  }
+  canvas{max-width:100%; height:auto; border-radius:8px; cursor:pointer; touch-action:manipulation;}
+  #hint{
+    text-align:center; font-size:.86rem; color:var(--text);
+    background:#2e2527; border:1px solid #4a3a3a; border-radius:12px; padding:9px 12px;
+  }
+  #hint b{color:var(--accent);}
+  #legend{color:var(--sub); font-size:.76rem; text-align:center;}
+  #legend .c1{color:var(--accent);} #legend .c2{color:var(--reveal);}
+  #status{color:var(--sub); font-size:.8rem; text-align:center; min-height:1.2em;}
+
+  footer{margin-top:26px; color:var(--sub); font-size:.74rem; text-align:center; line-height:1.8; max-width:640px;}
+  footer b{color:var(--text);}
+
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>かおかくし<span class="dot">。</span></h1>
+  <p class="tagline">全員にぼかしをかけて、見せたい人だけタップで解除。Zoomスクショ・集合写真のSNS投稿用。</p>
+</header>
+
+<main>
+  <div id="dropzone" role="button" tabindex="0" aria-label="画像を選択">
+    <div class="glyph" aria-hidden="true">
+      <span></span><span class="blur"></span><span class="blur"></span><span class="blur"></span>
+    </div>
+    <p class="big">ここに画像をドラッグ&ドロップ / タップして選択</p>
+    <p class="small">PCならスクショを撮って Ctrl+V(⌘+V)で貼り付けもOK<br>画像は端末内だけで処理されます</p>
+  </div>
+  <input type="file" id="fileInput" accept="image/*">
+
+  <div id="toolbar">
+    <div class="seg" role="group" aria-label="検出モード">
+      <button id="modeFace" class="on">顔で検出</button>
+      <button id="modeGrid">Zoomタイル</button>
+    </div>
+    <button id="btnAdd">＋ 手動で四角を追加</button>
+    <button id="btnRedetect">再検出</button>
+    <div class="seg" role="group" aria-label="加工の種類">
+      <button id="effBlur" class="on">ぼかし</button>
+      <button id="effMosaic">モザイク</button>
+    </div>
+    <div class="seg" role="group" aria-label="ぼかし範囲">
+      <button id="rangeFace" class="on">顔まわり</button>
+      <button id="rangeWide">大きめ</button>
+    </div>
+    <div class="slider-wrap">強さ<input type="range" id="strength" min="4" max="40" value="16"></div>
+    <div class="spacer"></div>
+    <button id="btnReset">最初から</button>
+    <button id="btnSave" class="primary">画像を保存</button>
+  </div>
+
+  <div id="stage">
+    <div id="hint">ぼかしを<b>外したい人をタップ</b>してください(もう一度タップで元に戻ります)</div>
+    <div id="canvasWrap"><canvas id="cv"></canvas></div>
+    <p id="legend"><span class="c1">点線=ぼかし中</span> / <span class="c2">実線=表示中</span> / 手動枠は右上の✕で削除</p>
+    <p id="status"></p>
+  </div>
+</main>
+
+<footer>
+  <b>プライバシーについて:</b> このツールはブラウザ内だけで動作し、画像がサーバーに送信されることはありません。<br>
+  自動検出は横顔・小さい顔などを見逃すことがあります。保存前に隠し漏れがないか必ず確認してください。
+</footer>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const dz = $('dropzone'), fi = $('fileInput'), cv = $('cv'), ctx = cv.getContext('2d');
+  const statusEl = $('status');
+
+  let source = null;              // 正規化済み画像(canvas)
+  let regions = [];               // {x,y,w,h,active,manual}
+  let effect = 'blur';            // 'blur' | 'mosaic'
+  let rangeMode = 'face';         // 'face' | 'wide'
+  let strength = 16;
+  let addMode = false;
+  let drawing = null;             // 追加モードのドラッグ中矩形
+  let interaction = null;         // 手動枠の移動/リサイズ中の状態
+  let modelsReady = false;
+  let rawDetections = [];         // 検出した生の顔ボックス(範囲切替用)
+  let autoMode = 'face';          // 'face' | 'grid'
+  let gridTiles = [];             // 検出済みZoomタイル(生の矩形)
+
+  const filterSupported = (() => {
+    const c = document.createElement('canvas').getContext('2d');
+    c.filter = 'blur(2px)';
+    return c.filter === 'blur(2px)';
+  })();
+  if (!filterSupported) { effect = 'mosaic'; }
+
+  function setStatus(msg){ statusEl.textContent = msg; }
+
+  // ---------- モデル読み込み ----------
+  // モデル本体(重みファイル)はプロジェクト内の models/ に同梱してあるので、
+  // 外部CDNには一切アクセスせずオフラインでも顔検出が動く。
+  async function loadModels(){
+    if (modelsReady) return true;
+    if (typeof faceapi === 'undefined') return false;
+    try {
+      await faceapi.nets.tinyFaceDetector.loadFromUri('models');
+      modelsReady = true;
+      return true;
+    } catch(e){
+      return false;
+    }
+  }
+
+  // ---------- 画像読み込み ----------
+  async function loadImage(file){
+    if (!file || !file.type.startsWith('image/')) return;
+    let bmp;
+    try { bmp = await createImageBitmap(file, { imageOrientation:'from-image' }); }
+    catch(e){
+      bmp = await new Promise((res, rej) => {
+        const img = new Image();
+        img.onload = () => res(img);
+        img.onerror = rej;
+        img.src = URL.createObjectURL(file);
+      });
+    }
+    const off = document.createElement('canvas');
+    off.width = bmp.width; off.height = bmp.height;
+    off.getContext('2d').drawImage(bmp, 0, 0);
+    source = off;
+    cv.width = off.width; cv.height = off.height;
+    regions = []; rawDetections = []; gridTiles = [];
+    dz.style.display = 'none';
+    $('toolbar').style.display = 'flex';
+    $('stage').style.display = 'flex';
+    render();
+
+    autoMode = 'face';
+    setModeButtons();
+    await detectFaces();
+
+    // Zoomのタイル区切りがある画像なら、そちらを優先モードにする
+    const grid = detectZoomGrid(source);
+    if (grid && grid.tiles.length >= 2){
+      gridTiles = grid.tiles;
+      autoMode = 'grid';
+      setModeButtons();
+      applyGridRegions();
+      setStatus(`Zoomのタイル(${grid.tiles.length}枠)を検出しました。見せたい人のタイルをタップして解除してください。`);
+    }
+  }
+
+  // ---------- 顔検出 ----------
+  function padBox(b){
+    const padX = rangeMode === 'wide' ? 0.9 : 0.32;
+    const padT = rangeMode === 'wide' ? 1.1 : 0.55;
+    const padB = rangeMode === 'wide' ? 0.9 : 0.35;
+    let x = b.x - b.w * padX, y = b.y - b.h * padT;
+    let w = b.w * (1 + padX * 2), h = b.h * (1 + padT + padB);
+    x = Math.max(0, x); y = Math.max(0, y);
+    w = Math.min(source.width - x, w); h = Math.min(source.height - y, h);
+    return { x, y, w, h };
+  }
+
+  async function detectFaces(){
+    setStatus('顔を検出しています…');
+    const ok = await loadModels();
+    if (!ok){
+      setStatus('自動検出が使えない環境です。「＋手動で四角を追加」でぼかしを追加してください。');
+      return;
+    }
+    try {
+      const dets = await faceapi.detectAllFaces(
+        source,
+        new faceapi.TinyFaceDetectorOptions({ inputSize: 512, scoreThreshold: 0.4 })
+      );
+      rawDetections = dets.map(d => ({ x:d.box.x, y:d.box.y, w:d.box.width, h:d.box.height }));
+      regions = regions.filter(r => r.manual);
+      for (const b of rawDetections){
+        regions.push({ ...padBox(b), active:true, manual:false });
+      }
+      setStatus(rawDetections.length > 0
+        ? `${rawDetections.length}人の顔を検出し、ぼかしをかけました。見せたい顔をタップして解除してください。`
+        : '顔を検出できませんでした。「＋手動で四角を追加」をお使いください。');
+    } catch(e){
+      setStatus('検出中にエラーが発生しました。手動追加をお使いください。');
+    }
+    render();
+  }
+
+  function rebuildAutoRegions(){
+    const manual = regions.filter(r => r.manual);
+    const states = regions.filter(r => !r.manual).map(r => r.active);
+    const rebuilt = rawDetections.map((b, i) => ({ ...padBox(b), active: states[i] !== undefined ? states[i] : true, manual:false }));
+    regions = [...rebuilt, ...manual];
+    render();
+  }
+
+  // ---------- Zoomタイル自動検出 ----------
+  // Zoomのギャラリービューはタイル間に細い単色の境界線があり、
+  // 映像本体(人・背景)より画素のばらつき(分散)が極端に小さいことを利用して
+  // グリッド線の位置を推定する。
+  function detectZoomGrid(src){
+    const W = src.width, H = src.height;
+    const maxDim = 1000;
+    const scale = Math.min(1, maxDim / Math.max(W, H));
+    const sw = Math.max(1, Math.round(W * scale));
+    const sh = Math.max(1, Math.round(H * scale));
+    const off = document.createElement('canvas');
+    off.width = sw; off.height = sh;
+    const octx = off.getContext('2d');
+    // 縮小時のアンチエイリアスで細い境界線がぼやけると分散のギャップが消えてしまうため、
+    // 補間なしの縮小(ニアレストネイバー相当)にして境界線のコントラストを保つ
+    octx.imageSmoothingEnabled = false;
+    octx.drawImage(src, 0, 0, sw, sh);
+    const { data } = octx.getImageData(0, 0, sw, sh);
+
+    const gray = new Float32Array(sw * sh);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++){
+      gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+
+    function rowVarianceFull(){
+      const arr = new Float32Array(sh);
+      for (let y = 0; y < sh; y++){
+        let sum = 0, sumSq = 0;
+        const base = y * sw;
+        for (let x = 0; x < sw; x++){ const v = gray[base + x]; sum += v; sumSq += v * v; }
+        const mean = sum / sw;
+        arr[y] = sumSq / sw - mean * mean;
+      }
+      return arr;
+    }
+    // 列の分散はその行の帯(y0〜y1)だけを見て計算する。スポットライト表示のように
+    // 上の帯だけ複数人に分かれ、下は1人分の巨大タイル、というレイアウトでは
+    // 列の区切り線が画像全体を貫通しないため、帯ごとに独立して求める必要がある。
+    function colVarianceBand(y0, y1){
+      const h = y1 - y0;
+      const arr = new Float32Array(sw);
+      for (let x = 0; x < sw; x++){
+        let sum = 0, sumSq = 0;
+        for (let y = y0; y < y1; y++){ const v = gray[y * sw + x]; sum += v; sumSq += v * v; }
+        const mean = sum / h;
+        arr[x] = sumSq / h - mean * mean;
+      }
+      return arr;
+    }
+
+    function findLines(varArr, len){
+      // 境界線(ほぼ単色)と映像本体(ばらつき大)は分散の分布に断絶があるはず。
+      // イラスト調の画像などは「境界線→ベタ塗り背景→柄のある部分」のように
+      // 3段階以上の階調になることがあり、その場合「最大のギャップ」を採用すると
+      // 中間の階調(ベタ塗り背景)を突き抜けてしまう。境界線クラスタ(分散最小)の
+      // 直後に来る最初の有意なジャンプを閾値にすることで、この誤りを避ける。
+      const sorted = Float32Array.from(varArr).sort();
+      const searchEnd = Math.max(2, Math.floor(len * 0.35));
+      let bestIdx = -1;
+      for (let i = 1; i < searchEnd; i++){
+        const g = sorted[i] - sorted[i - 1];
+        const lowVal = sorted[i - 1];
+        if (g >= Math.max(8, lowVal * 1.2)){ bestIdx = i; break; }
+      }
+      if (bestIdx < 0) return []; // 明確な断絶がない = 単色/グリッドなし
+
+      const threshold = (sorted[bestIdx - 1] + sorted[bestIdx]) / 2;
+      const candidates = [];
+      for (let i = 0; i < len; i++){ if (varArr[i] <= threshold) candidates.push(i); }
+
+      const bands = [];
+      let bandStart = null, prev = -10;
+      for (const i of candidates){
+        if (i - prev > 2){ if (bandStart !== null) bands.push([bandStart, prev]); bandStart = i; }
+        prev = i;
+      }
+      if (bandStart !== null) bands.push([bandStart, prev]);
+
+      return bands
+        .filter(([a, b]) => b - a <= 12)               // 境界線は細い(太い平坦領域は誤検出)
+        .map(([a, b]) => Math.round((a + b) / 2))
+        .filter(pos => pos > len * 0.015 && pos < len * 0.985); // 端ギリギリ(画像外周)は除外
+    }
+
+    function isRegular(lines, len){
+      if (lines.length === 0) return true;
+      const all = [0, ...lines, len].sort((a, b) => a - b);
+      const gaps = [];
+      for (let i = 1; i < all.length; i++) gaps.push(all[i] - all[i - 1]);
+      return Math.min(...gaps) >= len * 0.06;           // タイルが小さすぎるのはノイズ扱い
+    }
+
+    // 1段目: 画像全体を貫通する行の区切りを検出
+    let ys = findLines(rowVarianceFull(), sh);
+    if (!isRegular(ys, sh)) ys = [];
+    const allYs = [0, ...ys, sh].sort((a, b) => a - b);
+    const invScale = 1 / scale;
+
+    // 2段目: 行の帯ごとに、その帯の中だけで列の区切りを検出
+    const tiles = [];
+    for (let r = 0; r < allYs.length - 1; r++){
+      const y0 = allYs[r], y1 = allYs[r + 1];
+      const h = y1 - y0;
+      if (h < sh * 0.04) continue;
+      let xs = findLines(colVarianceBand(y0, y1), sw);
+      if (!isRegular(xs, sw)) xs = [];
+      const allXs = [0, ...xs, sw].sort((a, b) => a - b);
+      for (let c = 0; c < allXs.length - 1; c++){
+        const x0 = allXs[c], x1 = allXs[c + 1];
+        const w = x1 - x0;
+        if (w < sw * 0.04) continue;                    // 極端に細いスライバーは無視
+        tiles.push({ x: x0 * invScale, y: y0 * invScale, w: w * invScale, h: h * invScale });
+      }
+    }
+    if (tiles.length < 2) return null;
+    return { tiles };
+  }
+
+  function applyGridRegions(){
+    const manual = regions.filter(r => r.manual);
+    const rebuilt = gridTiles.map(t => ({ ...t, active: true, manual: false, __grid: true }));
+    regions = [...rebuilt, ...manual];
+    render();
+  }
+
+  function setModeButtons(){
+    $('modeFace').classList.toggle('on', autoMode === 'face');
+    $('modeGrid').classList.toggle('on', autoMode === 'grid');
+  }
+
+  // ---------- 描画 ----------
+  function drawEffect(r){
+    const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h);
+    if (w < 2 || h < 2) return;
+    if (effect === 'blur' && filterSupported){
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      ctx.filter = `blur(${strength}px)`;
+      ctx.drawImage(source, 0, 0);
+      ctx.restore();
+    } else {
+      const block = Math.max(4, strength);
+      const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
+      const off = drawEffect._off || (drawEffect._off = document.createElement('canvas'));
+      off.width = sw; off.height = sh;
+      const octx = off.getContext('2d');
+      octx.imageSmoothingEnabled = true;
+      octx.drawImage(source, x, y, w, h, 0, 0, sw, sh);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(off, 0, 0, sw, sh, x, y, w, h);
+      ctx.imageSmoothingEnabled = true;
+    }
+  }
+
+  function handleSize(){
+    const scale = cv.clientWidth ? cv.clientWidth / cv.width : 1;
+    return Math.min(64, Math.max(18, 26 / scale));
+  }
+
+  // 手動枠のリサイズ: つまんだ角の対角(固定角)を基準に矩形を再計算する
+  function applyResize(region, handle, orig, curX, curY){
+    const minSize = 16;
+    let x0, y0, x1, y1;
+    if (handle === 'tl'){
+      x1 = orig.x + orig.w; y1 = orig.y + orig.h;
+      x0 = Math.min(curX, x1 - minSize);
+      y0 = Math.min(curY, y1 - minSize);
+    } else if (handle === 'bl'){
+      x1 = orig.x + orig.w; y0 = orig.y;
+      x0 = Math.min(curX, x1 - minSize);
+      y1 = Math.max(curY, y0 + minSize);
+    } else { // 'br'
+      x0 = orig.x; y0 = orig.y;
+      x1 = Math.max(curX, x0 + minSize);
+      y1 = Math.max(curY, y0 + minSize);
+    }
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+    x1 = Math.min(source.width, x1); y1 = Math.min(source.height, y1);
+    region.x = x0; region.y = y0; region.w = x1 - x0; region.h = y1 - y0;
+  }
+
+  function render(showGuides = true){
+    if (!source) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(source, 0, 0);
+    for (const r of regions){ if (r.active) drawEffect(r); }
+
+    if (drawing){
+      ctx.save();
+      ctx.strokeStyle = '#F58A7C'; ctx.setLineDash([8, 6]); ctx.lineWidth = 3;
+      ctx.strokeRect(drawing.x, drawing.y, drawing.w, drawing.h);
+      ctx.restore();
+    }
+    if (!showGuides) return;
+
+    const hs = handleSize();
+    for (const r of regions){
+      ctx.save();
+      ctx.lineWidth = Math.max(2, hs / 9);
+      if (r.active){ ctx.strokeStyle = 'rgba(245,138,124,.95)'; ctx.setLineDash([10, 7]); }
+      else { ctx.strokeStyle = 'rgba(126,210,180,.95)'; ctx.setLineDash([]); }
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.restore();
+      if (r.manual){
+        const bx = r.x + r.w - hs, by = r.y;
+        ctx.save();
+        ctx.fillStyle = 'rgba(23,24,28,.85)';
+        ctx.fillRect(bx, by, hs, hs);
+        ctx.strokeStyle = 'rgba(244,242,237,.8)'; ctx.lineWidth = Math.max(1.5, hs / 12);
+        const pad = hs * 0.28;
+        ctx.beginPath();
+        ctx.moveTo(bx + pad, by + pad); ctx.lineTo(bx + hs - pad, by + hs - pad);
+        ctx.moveTo(bx + hs - pad, by + pad); ctx.lineTo(bx + pad, by + hs - pad);
+        ctx.stroke();
+        ctx.restore();
+
+        // リサイズ用ハンドル(左上・左下・右下の3角、右上は削除ボタンなので除く)
+        for (const [hx, hy] of [[r.x, r.y], [r.x, r.y + r.h - hs], [r.x + r.w - hs, r.y + r.h - hs]]){
+          ctx.save();
+          const cx = hx + hs / 2, cy = hy + hs / 2;
+          ctx.fillStyle = 'rgba(23,24,28,.85)';
+          ctx.beginPath(); ctx.arc(cx, cy, hs / 2, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(244,242,237,.9)'; ctx.lineWidth = Math.max(1.5, hs / 10);
+          ctx.beginPath(); ctx.arc(cx, cy, hs * 0.32, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+  }
+
+  // ---------- 座標変換 & タップ処理 ----------
+  function toImageXY(e){
+    const rect = cv.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (cv.width / rect.width),
+      y: (e.clientY - rect.top) * (cv.height / rect.height)
+    };
+  }
+
+  cv.addEventListener('pointerdown', e => {
+    if (!source) return;
+    const p = toImageXY(e);
+    if (addMode){
+      drawing = { x:p.x, y:p.y, w:0, h:0, sx:p.x, sy:p.y };
+      cv.setPointerCapture(e.pointerId);
+      return;
+    }
+    const hs = handleSize();
+    for (let i = regions.length - 1; i >= 0; i--){
+      const r = regions[i];
+      if (!r.manual){
+        if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h){
+          r.active = !r.active;
+          setStatus(r.active ? 'ぼかしをかけました。' : 'ぼかしを外しました。');
+          render();
+          return;
+        }
+        continue;
+      }
+      // 手動枠: 削除ボタン(右上) → リサイズハンドル(左上/左下/右下) → 本体の順に判定
+      const trX = r.x + r.w - hs, trY = r.y;
+      if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
+        regions.splice(i, 1);
+        setStatus('手動の枠を削除しました。');
+        render();
+        return;
+      }
+      const handles = [
+        ['tl', r.x, r.y],
+        ['bl', r.x, r.y + r.h - hs],
+        ['br', r.x + r.w - hs, r.y + r.h - hs]
+      ];
+      const hit = handles.find(([, hx, hy]) => p.x >= hx && p.x <= hx + hs && p.y >= hy && p.y <= hy + hs);
+      if (hit){
+        interaction = { type:'resize', region:r, handle:hit[0], orig:{ x:r.x, y:r.y, w:r.w, h:r.h } };
+        cv.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h){
+        interaction = { type:'move', region:r, startX:p.x, startY:p.y, orig:{ x:r.x, y:r.y }, moved:false };
+        cv.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
+  });
+
+  cv.addEventListener('pointermove', e => {
+    const p = toImageXY(e);
+    if (drawing){
+      drawing.x = Math.min(drawing.sx, p.x);
+      drawing.y = Math.min(drawing.sy, p.y);
+      drawing.w = Math.abs(p.x - drawing.sx);
+      drawing.h = Math.abs(p.y - drawing.sy);
+      render();
+      return;
+    }
+    if (!interaction) return;
+    if (interaction.type === 'move'){
+      const dx = p.x - interaction.startX, dy = p.y - interaction.startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) interaction.moved = true;
+      const region = interaction.region;
+      region.x = Math.max(0, Math.min(source.width - region.w, interaction.orig.x + dx));
+      region.y = Math.max(0, Math.min(source.height - region.h, interaction.orig.y + dy));
+    } else if (interaction.type === 'resize'){
+      applyResize(interaction.region, interaction.handle, interaction.orig, p.x, p.y);
+    }
+    render();
+  });
+
+  cv.addEventListener('pointerup', () => {
+    if (drawing){
+      if (drawing.w > 12 && drawing.h > 12){
+        regions.push({ x:drawing.x, y:drawing.y, w:drawing.w, h:drawing.h, active:true, manual:true });
+        setStatus('手動の枠を追加しました。');
+      }
+      drawing = null;
+      setAddMode(false);
+      render();
+      return;
+    }
+    if (interaction){
+      if (interaction.type === 'move'){
+        if (!interaction.moved){
+          interaction.region.active = !interaction.region.active;
+          setStatus(interaction.region.active ? 'ぼかしをかけました。' : 'ぼかしを外しました。');
+        } else {
+          setStatus('手動枠を移動しました。');
+        }
+      } else if (interaction.type === 'resize'){
+        setStatus('手動枠のサイズを変更しました。');
+      }
+      interaction = null;
+      render();
+    }
+  });
+
+  // ---------- ツールバー ----------
+  function setAddMode(on){
+    addMode = on;
+    $('btnAdd').classList.toggle('active-mode', on);
+    $('btnAdd').textContent = on ? 'ドラッグで範囲を指定…' : '＋ 手動で四角を追加';
+    cv.style.touchAction = on ? 'none' : 'manipulation';
+    cv.style.cursor = on ? 'crosshair' : 'pointer';
+  }
+  $('btnAdd').addEventListener('click', () => setAddMode(!addMode));
+  $('btnRedetect').addEventListener('click', () => {
+    if (autoMode === 'grid'){
+      const grid = detectZoomGrid(source);
+      if (grid && grid.tiles.length >= 2){
+        gridTiles = grid.tiles;
+        applyGridRegions();
+        setStatus(`Zoomのタイル(${grid.tiles.length}枠)を検出し直しました。`);
+      } else {
+        setStatus('タイルの区切りを検出できませんでした。「顔で検出」または手動追加をお使いください。');
+      }
+    } else {
+      detectFaces();
+    }
+  });
+
+  $('modeFace').addEventListener('click', () => {
+    if (!source) return;
+    autoMode = 'face';
+    setModeButtons();
+    if (rawDetections.length > 0) rebuildAutoRegions();
+    else detectFaces();
+  });
+  $('modeGrid').addEventListener('click', () => {
+    if (!source) return;
+    autoMode = 'grid';
+    setModeButtons();
+    const grid = detectZoomGrid(source);
+    if (grid && grid.tiles.length >= 2){
+      gridTiles = grid.tiles;
+      applyGridRegions();
+      setStatus(`Zoomのタイル(${grid.tiles.length}枠)を検出しました。見せたい人のタイルをタップして解除してください。`);
+    } else {
+      gridTiles = [];
+      regions = regions.filter(r => r.manual);
+      render();
+      setStatus('タイルの区切りを検出できませんでした。集合写真などタイルがない画像は「顔で検出」をお使いください。');
+    }
+  });
+
+  $('effBlur').addEventListener('click', () => {
+    if (!filterSupported){ setStatus('この環境ではぼかしが使えないため、モザイクをお使いください。'); return; }
+    effect = 'blur';
+    $('effBlur').classList.add('on'); $('effMosaic').classList.remove('on');
+    render();
+  });
+  $('effMosaic').addEventListener('click', () => {
+    effect = 'mosaic';
+    $('effMosaic').classList.add('on'); $('effBlur').classList.remove('on');
+    render();
+  });
+
+  $('rangeFace').addEventListener('click', () => {
+    rangeMode = 'face';
+    $('rangeFace').classList.add('on'); $('rangeWide').classList.remove('on');
+    autoMode = 'face';
+    setModeButtons();
+    rebuildAutoRegions();
+  });
+  $('rangeWide').addEventListener('click', () => {
+    rangeMode = 'wide';
+    $('rangeWide').classList.add('on'); $('rangeFace').classList.remove('on');
+    autoMode = 'face';
+    setModeButtons();
+    rebuildAutoRegions();
+  });
+
+  $('strength').addEventListener('input', e => { strength = +e.target.value; render(); });
+
+  $('btnReset').addEventListener('click', () => {
+    source = null; regions = []; rawDetections = []; gridTiles = []; drawing = null;
+    autoMode = 'face';
+    setModeButtons();
+    setAddMode(false);
+    dz.style.display = 'block';
+    $('toolbar').style.display = 'none';
+    $('stage').style.display = 'none';
+    setStatus('');
+    fi.value = '';
+  });
+
+  $('btnSave').addEventListener('click', () => {
+    if (!source) return;
+    render(false); // ガイド線なしで描き直し
+    cv.toBlob(blob => {
+      const a = document.createElement('a');
+      const d = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      a.download = `kaokakushi_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.png`;
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      render(true);
+      setStatus('画像を保存しました。そのままSNSに投稿できます。');
+    }, 'image/png');
+  });
+
+  // ---------- 入力(選択 / D&D / ペースト) ----------
+  dz.addEventListener('click', () => fi.click());
+  dz.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fi.click(); });
+  fi.addEventListener('change', () => loadImage(fi.files[0]));
+
+  ['dragover','dragenter'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('dragover');
+  }));
+  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('dragover');
+  }));
+  dz.addEventListener('drop', e => loadImage(e.dataTransfer.files[0]));
+
+  document.addEventListener('paste', e => {
+    const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+    if (item) loadImage(item.getAsFile());
+  });
+
+  window.addEventListener('resize', () => render());
+
+  if ('serviceWorker' in navigator){
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => { /* オフライン化できなくても本体機能には影響しない */ });
+    });
+  }
+})();
+</script>
+</body>
+</html>
