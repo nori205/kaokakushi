@@ -170,13 +170,6 @@
   let autoMode = 'face';          // 'face' | 'grid'
   let gridTiles = [];             // 検出済みZoomタイル(生の矩形)
 
-  const filterSupported = (() => {
-    const c = document.createElement('canvas').getContext('2d');
-    c.filter = 'blur(2px)';
-    return c.filter === 'blur(2px)';
-  })();
-  if (!filterSupported) { effect = 'mosaic'; }
-
   function setStatus(msg){ statusEl.textContent = msg; }
 
   // ---------- モデル読み込み ----------
@@ -207,9 +200,15 @@
         img.src = URL.createObjectURL(file);
       });
     }
+    // iOS Safariはcanvasのメモリ使用量に上限があり、iPhoneの高画素写真
+    // (4800万画素モードなど)をそのままcanvasへ読み込むとメモリ不足でタブが
+    // 落ちて画面が真っ黒になることがあるため、長辺を上限まで縮小してから読み込む。
+    // (SNS投稿用途なので画質は十分)
+    const MAX_DIM = 2400;
+    const scale = Math.min(1, MAX_DIM / Math.max(bmp.width, bmp.height));
     const off = document.createElement('canvas');
-    off.width = bmp.width; off.height = bmp.height;
-    off.getContext('2d').drawImage(bmp, 0, 0);
+    off.width = Math.round(bmp.width * scale); off.height = Math.round(bmp.height * scale);
+    off.getContext('2d').drawImage(bmp, 0, 0, off.width, off.height);
     source = off;
     cv.width = off.width; cv.height = off.height;
     regions = []; rawDetections = []; gridTiles = [];
@@ -412,40 +411,30 @@
   }
 
   // ---------- 描画 ----------
-  // iOS Safariには「ctx.clip()とctx.filter=blur()を組み合わせると
-  // その範囲が完全に透明(クリア)になる」という既知のWebKitの不具合があるため、
-  // clip()は使わずオフスクリーンcanvas上でぼかしをかけてから貼り付ける。
-  // ぼかし半径ぶんの余白を付けて切り出すことで、範囲の境界での縁のにじみ(サンプル不足)も防ぐ。
+  // ぼかし/モザイクはどちらも「縮小してから拡大する」方式で実装する
+  // (縮小時は補間して平均化 → 拡大時に補間ありなら滑らかな"ぼかし"、補間なしなら
+  // 角がくっきりした"モザイク"になる)。iOS Safariのctx.filter(blur)は
+  // clipとの組み合わせで描画範囲が透明になったり、画像が大きいと無反応になったりする
+  // 既知の不具合があるため、canvasの拡大縮小だけで完結するこの方式に統一している。
+  function effectBlock(){
+    return effect === 'blur' ? Math.max(1.5, strength / 3) : Math.max(4, strength);
+  }
+
   function drawEffect(r){
     if (r.freehand){ drawFreehandEffect(r); return; }
     const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h);
     if (w < 2 || h < 2) return;
-    if (effect === 'blur' && filterSupported){
-      const pad = Math.ceil(strength * 2);
-      const sx = Math.max(0, x - pad), sy = Math.max(0, y - pad);
-      const ex = Math.min(source.width, x + w + pad), ey = Math.min(source.height, y + h + pad);
-      const sw = ex - sx, sh = ey - sy;
-      if (sw < 1 || sh < 1) return;
-      const off = drawEffect._blurOff || (drawEffect._blurOff = document.createElement('canvas'));
-      off.width = sw; off.height = sh;
-      const octx = off.getContext('2d');
-      octx.clearRect(0, 0, sw, sh);
-      octx.filter = `blur(${strength}px)`;
-      octx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
-      octx.filter = 'none';
-      ctx.drawImage(off, x - sx, y - sy, w, h, x, y, w, h);
-    } else {
-      const block = Math.max(4, strength);
-      const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
-      const off = drawEffect._off || (drawEffect._off = document.createElement('canvas'));
-      off.width = sw; off.height = sh;
-      const octx = off.getContext('2d');
-      octx.imageSmoothingEnabled = true;
-      octx.drawImage(source, x, y, w, h, 0, 0, sw, sh);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(off, 0, 0, sw, sh, x, y, w, h);
-      ctx.imageSmoothingEnabled = true;
-    }
+    const isBlur = effect === 'blur';
+    const block = effectBlock();
+    const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
+    const off = drawEffect._off || (drawEffect._off = document.createElement('canvas'));
+    off.width = sw; off.height = sh;
+    const octx = off.getContext('2d');
+    octx.imageSmoothingEnabled = true;
+    octx.drawImage(source, x, y, w, h, 0, 0, sw, sh);
+    ctx.imageSmoothingEnabled = isBlur;
+    ctx.drawImage(off, 0, 0, sw, sh, x, y, w, h);
+    ctx.imageSmoothingEnabled = true;
   }
 
   // フリーハンド塗り: 加工済み(ぼかし/モザイク)の画像全体を1回だけ作り、
@@ -454,26 +443,21 @@
   let effCanvasCache = null;
   function getFullEffectCanvas(){
     if (effCanvasCache) return effCanvasCache;
+    const isBlur = effect === 'blur';
+    const block = effectBlock();
     const eff = drawFreehandEffect._eff || (drawFreehandEffect._eff = document.createElement('canvas'));
     eff.width = source.width; eff.height = source.height;
     const ectx = eff.getContext('2d');
     ectx.clearRect(0, 0, eff.width, eff.height);
-    if (effect === 'blur' && filterSupported){
-      ectx.filter = `blur(${strength}px)`;
-      ectx.drawImage(source, 0, 0);
-      ectx.filter = 'none';
-    } else {
-      const block = Math.max(4, strength);
-      const sw = Math.max(1, Math.round(source.width / block)), sh = Math.max(1, Math.round(source.height / block));
-      const off = drawFreehandEffect._off || (drawFreehandEffect._off = document.createElement('canvas'));
-      off.width = sw; off.height = sh;
-      const octx = off.getContext('2d');
-      octx.imageSmoothingEnabled = true;
-      octx.drawImage(source, 0, 0, sw, sh);
-      ectx.imageSmoothingEnabled = false;
-      ectx.drawImage(off, 0, 0, sw, sh, 0, 0, eff.width, eff.height);
-      ectx.imageSmoothingEnabled = true;
-    }
+    const sw = Math.max(1, Math.round(source.width / block)), sh = Math.max(1, Math.round(source.height / block));
+    const off = drawFreehandEffect._off || (drawFreehandEffect._off = document.createElement('canvas'));
+    off.width = sw; off.height = sh;
+    const octx = off.getContext('2d');
+    octx.imageSmoothingEnabled = true;
+    octx.drawImage(source, 0, 0, sw, sh);
+    ectx.imageSmoothingEnabled = isBlur;
+    ectx.drawImage(off, 0, 0, sw, sh, 0, 0, eff.width, eff.height);
+    ectx.imageSmoothingEnabled = true;
     effCanvasCache = eff;
     return eff;
   }
@@ -851,7 +835,6 @@
   });
 
   $('effBlur').addEventListener('click', () => {
-    if (!filterSupported){ setStatus('この環境ではぼかしが使えないため、モザイクをお使いください。'); return; }
     effect = 'blur';
     $('effBlur').classList.add('on'); $('effMosaic').classList.remove('on');
     render();
