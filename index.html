@@ -587,10 +587,9 @@
     if (drawing){
       if (drawing.w > 12 && drawing.h > 12){
         regions.push({ x:drawing.x, y:drawing.y, w:drawing.w, h:drawing.h, active:true, manual:true });
-        setStatus('手動の枠を追加しました。');
+        setStatus('手動の枠を追加しました。続けて別の場所もドラッグできます。終わったら「ドラッグで範囲を指定…」を押すと解除されます。');
       }
       drawing = null;
-      setAddMode(false);
       render();
       return;
     }
