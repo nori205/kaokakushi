@@ -412,16 +412,28 @@
   }
 
   // ---------- 描画 ----------
+  // iOS Safariには「ctx.clip()とctx.filter=blur()を組み合わせると
+  // その範囲が完全に透明(クリア)になる」という既知のWebKitの不具合があるため、
+  // clip()は使わずオフスクリーンcanvas上でぼかしをかけてから貼り付ける。
+  // ぼかし半径ぶんの余白を付けて切り出すことで、範囲の境界での縁のにじみ(サンプル不足)も防ぐ。
   function drawEffect(r){
     if (r.freehand){ drawFreehandEffect(r); return; }
     const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h);
     if (w < 2 || h < 2) return;
     if (effect === 'blur' && filterSupported){
-      ctx.save();
-      ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
-      ctx.filter = `blur(${strength}px)`;
-      ctx.drawImage(source, 0, 0);
-      ctx.restore();
+      const pad = Math.ceil(strength * 2);
+      const sx = Math.max(0, x - pad), sy = Math.max(0, y - pad);
+      const ex = Math.min(source.width, x + w + pad), ey = Math.min(source.height, y + h + pad);
+      const sw = ex - sx, sh = ey - sy;
+      if (sw < 1 || sh < 1) return;
+      const off = drawEffect._blurOff || (drawEffect._blurOff = document.createElement('canvas'));
+      off.width = sw; off.height = sh;
+      const octx = off.getContext('2d');
+      octx.clearRect(0, 0, sw, sh);
+      octx.filter = `blur(${strength}px)`;
+      octx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+      octx.filter = 'none';
+      ctx.drawImage(off, x - sx, y - sy, w, h, x, y, w, h);
     } else {
       const block = Math.max(4, strength);
       const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
