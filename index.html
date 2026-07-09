@@ -771,18 +771,6 @@
       return;
     }
     const p = toImageXY(e);
-    if (addMode){
-      if (selectedRegion){ selectedRegion = null; render(); }
-      drawing = { x:p.x, y:p.y, w:0, h:0, sx:p.x, sy:p.y };
-      cv.setPointerCapture(e.pointerId);
-      return;
-    }
-    if (paintMode){
-      if (selectedRegion){ selectedRegion = null; render(); }
-      paintStroke = { points: [{ x:p.x, y:p.y }] };
-      cv.setPointerCapture(e.pointerId);
-      return;
-    }
     const hs = handleSize();
     // 削除✕・リサイズ丸ハンドルは普段は隠しておき、選択中の枠だけに表示する。
     // (触るとその枠が選択され、他をタップすると選択解除されてハンドルが消える)
@@ -853,6 +841,18 @@
         cv.setPointerCapture(e.pointerId);
         return;
       }
+    }
+    // 既存の枠に何も当たらなかった場合だけ、追加/塗りモードなら新規作成に進む。
+    // (既存の枠の近くに触れた時は、新規作成より調整を優先するため)
+    if (addMode){
+      drawing = { x:p.x, y:p.y, w:0, h:0, sx:p.x, sy:p.y };
+      cv.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (paintMode){
+      paintStroke = { points: [{ x:p.x, y:p.y }] };
+      cv.setPointerCapture(e.pointerId);
+      return;
     }
     if (prevSelected) render(); // 何もヒットしなかった=空白タップ → 選択解除を反映
   });
