@@ -369,7 +369,7 @@
       // イラスト調の画像などは「境界線→ベタ塗り背景→柄のある部分」のように
       // 3段階以上の階調になることがあり、その場合「最大のギャップ」を採用すると
       // 中間の階調(ベタ塗り背景)を突き抜けてしまう。境界線クラスタ(分散最小)の
-      // 直後に来る最初の有意なジャンプを閾値にすることで、この誤りを避ける。
+      // 直後に来る最初の有意なジャンプを優先的に閾値にすることで、この誤りを避ける。
       const sorted = Float32Array.from(varArr).sort();
       const searchEnd = Math.max(2, Math.floor(len * 0.35));
       let bestIdx = -1;
@@ -377,6 +377,18 @@
         const g = sorted[i] - sorted[i - 1];
         const lowVal = sorted[i - 1];
         if (g >= Math.max(8, lowVal * 1.2)){ bestIdx = i; break; }
+      }
+      if (bestIdx < 0){
+        // 実機スクショ(JPEG圧縮)では、境界線のはずの分散が0からじわじわ
+        // 立ち上がり(圧縮ノイズ)、上の相対的なジャンプ判定に引っかからない
+        // ことがある。その場合は探索範囲内で最大のギャップを境界線クラスタと
+        // 映像本体の分かれ目とみなすフォールバックを試す。
+        let fallbackIdx = -1, fallbackGap = -1;
+        for (let i = 1; i < searchEnd; i++){
+          const g = sorted[i] - sorted[i - 1];
+          if (g > fallbackGap){ fallbackGap = g; fallbackIdx = i; }
+        }
+        if (fallbackGap >= 8) bestIdx = fallbackIdx;
       }
       if (bestIdx < 0) return []; // 明確な断絶がない = 単色/グリッドなし
 
@@ -412,8 +424,48 @@
     const allYs = [0, ...ys, sh].sort((a, b) => a - b);
     const invScale = 1 / scale;
 
+    // 圧縮ノイズなどで検出が一部だけ崩れると、「ある行だけ列数が違う」
+    // 「ある行だけ極端に高さが違う」といった、実際のZoom画面ではまずあり得ない
+    // 歪な形になる。並び(値の配列)を見て、大多数と異なる要素が2つ以上ある、
+    // または大多数と違う要素が両端以外(中間)にある(スポットライト表示・
+    // 最終行の人数調整は通常いちばん上か下にしか起きない)場合、
+    // その並びは信用できないと判定する。
+    function tooIrregular(values, isSame){
+      if (values.length <= 1) return false;
+      let modeVal = values[0], modeHits = -1;
+      for (const v of values){
+        const hits = values.filter(w => isSame(v, w)).length;
+        if (hits > modeHits){ modeHits = hits; modeVal = v; }
+      }
+      let odd = 0;
+      values.forEach((v, i) => {
+        if (!isSame(v, modeVal)){
+          odd++;
+          if (i !== 0 && i !== values.length - 1) odd++;
+        }
+      });
+      return odd > 1;
+    }
+
+    // 1.5段目: 行の高さ自体が均一かどうかを先にチェックする
+    // (境界線の一部が検出できず、複数行がまとまって1行扱いになるケースを弾く)。
+    // 列数と違い、行の高さはスポットライト表示などの例外を除けば実際のZoom
+    // 画面ではほぼ揃っているはずなので、「最後の行だけは違ってよい」という
+    // 緩和はせず、位置に関係なく比率のズレだけで厳しく判定する。
+    const rowHeights = [];
+    for (let r = 0; r < allYs.length - 1; r++){
+      const h = allYs[r + 1] - allYs[r];
+      if (h < sh * 0.04) continue;
+      rowHeights.push(h);
+    }
+    if (rowHeights.length > 1){
+      const maxH = Math.max(...rowHeights), minH = Math.min(...rowHeights);
+      if (minH / maxH < 0.8) return null;
+    }
+
     // 2段目: 行の帯ごとに、その帯の中だけで列の区切りを検出
     const tiles = [];
+    const rowColCounts = [];
     for (let r = 0; r < allYs.length - 1; r++){
       const y0 = allYs[r], y1 = allYs[r + 1];
       const h = y1 - y0;
@@ -421,14 +473,19 @@
       let xs = findLines(colVarianceBand(y0, y1), sw);
       if (!isRegular(xs, sw)) xs = [];
       const allXs = [0, ...xs, sw].sort((a, b) => a - b);
+      let colCount = 0;
       for (let c = 0; c < allXs.length - 1; c++){
         const x0 = allXs[c], x1 = allXs[c + 1];
         const w = x1 - x0;
         if (w < sw * 0.04) continue;                    // 極端に細いスライバーは無視
         tiles.push({ x: x0 * invScale, y: y0 * invScale, w: w * invScale, h: h * invScale });
+        colCount++;
       }
+      rowColCounts.push(colCount);
     }
     if (tiles.length < 2) return null;
+    if (tooIrregular(rowColCounts, (a, b) => a === b)) return null;
+
     return { tiles };
   }
 
@@ -784,6 +841,11 @@
     for (let i = regions.length - 1; i >= 0; i--){
       const r = regions[i];
       if (!r.manual){
+        // 手動追加/フリーハンド塗りモード中は、自動検出枠を素通りさせて
+        // 下に新しい枠・線を描けるようにする。自動検出が複数人を1枠に
+        // まとめて誤検出した場合、その枠のON/OFFに邪魔されず、指で人ごとに
+        // 塗り分けられるようにするため(枠を消さなくても個別に描き直せる)。
+        if (addMode || paintMode) continue;
         // 自動検出の枠(顔・Zoomタイル): 選択中なら削除ボタン(右上)を先に判定。
         // 検出が間違っていた(複数人が1枠にまとまった等)場合、その枠だけ削除して
         // 手動で引き直せるようにするため。
