@@ -95,6 +95,16 @@
   footer{margin-top:26px; color:var(--sub); font-size:.74rem; text-align:center; line-height:1.8; max-width:640px;}
   footer b{color:var(--text);}
 
+  /* --- 更新通知バナー --- */
+  #updateBanner{
+    display:none; position:fixed; left:14px; right:14px; bottom:14px; z-index:100;
+    max-width:520px; margin:0 auto;
+    background:var(--surface); border:1px solid var(--accent); border-radius:14px;
+    padding:12px 14px; align-items:center; gap:12px;
+    box-shadow:0 6px 20px rgba(0,0,0,.35);
+  }
+  #updateBanner p{flex:1; font-size:.83rem; line-height:1.5;}
+
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
 </style>
 </head>
@@ -156,6 +166,11 @@
   <b>プライバシーについて:</b> このツールはブラウザ内だけで動作し、画像がサーバーに送信されることはありません。<br>
   自動検出は横顔・小さい顔などを見逃すことがあります。保存前に隠し漏れがないか必ず確認してください。
 </footer>
+
+<div id="updateBanner">
+  <p>新しいバージョンがあります。</p>
+  <button id="btnUpdate" class="primary">更新する</button>
+</div>
 
 <script>
 (() => {
@@ -1164,10 +1179,35 @@
 
   window.addEventListener('resize', () => render());
 
+  // ---------- 更新通知 ----------
+  // 新しいバージョンをpushしても、開きっぱなしのタブは古いコードのまま動き続ける
+  // (ブラウザの標準動作)。「更新がある」ことを検知したらバナーを出し、ボタン1つで
+  // OS問わず同じ操作(再読み込み)で最新版に切り替えられるようにする。
   if ('serviceWorker' in navigator){
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch(() => { /* オフライン化できなくても本体機能には影響しない */ });
+      navigator.serviceWorker.register('sw.js').then(reg => {
+        if (!reg) return;
+        const showBannerIfUpdate = worker => {
+          if (!worker) return;
+          worker.addEventListener('statechange', () => {
+            // controllerがすでにいる状態での'installed'=既存タブがある状態での新版インストール
+            // = 新規インストールではなく「更新」なのでバナーを出す
+            if (worker.state === 'installed' && navigator.serviceWorker.controller){
+              $('updateBanner').style.display = 'flex';
+            }
+          });
+        };
+        if (reg.waiting && navigator.serviceWorker.controller){
+          $('updateBanner').style.display = 'flex';
+        }
+        reg.addEventListener('updatefound', () => showBannerIfUpdate(reg.installing));
+        // タブに戻ってきたタイミングでも更新を確認し、閉じ直さなくても検知できるようにする
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update().catch(() => {});
+        });
+      }).catch(() => { /* オフライン化できなくても本体機能には影響しない */ });
     });
+    $('btnUpdate').addEventListener('click', () => window.location.reload());
   }
 })();
 </script>
