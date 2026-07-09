@@ -64,6 +64,8 @@
   }
   button:hover{background:#343744;}
   button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  button:disabled{opacity:.4; cursor:not-allowed;}
+  button:disabled:hover{background:#2c2e37;}
   button.primary{background:var(--accent); border-color:var(--accent); color:#241512; font-weight:700;}
   button.primary:hover{background:#f79c90;}
   button.active-mode{border-color:var(--accent); color:var(--accent); background:#2e2527;}
@@ -137,6 +139,7 @@
     </div>
     <div class="slider-wrap" id="strengthWrap">強さ<input type="range" id="strength" min="4" max="40" value="16"></div>
     <div class="spacer"></div>
+    <button id="btnUndo" disabled>↩ 戻す</button>
     <button id="btnReset">最初から</button>
     <button id="btnSave" class="primary">画像を保存</button>
   </div>
@@ -176,8 +179,24 @@
   let rawDetections = [];         // 検出した生の顔ボックス(範囲切替用)
   let autoMode = 'face';          // 'face' | 'grid'
   let gridTiles = [];             // 検出済みZoomタイル(生の矩形)
+  let undoStack = [];             // regionsのスナップショット履歴(「戻す」ボタン用)
 
   function setStatus(msg){ statusEl.textContent = msg; }
+
+  // ---------- 元に戻す ----------
+  function cloneRegions(list){
+    return list.map(r => r.freehand ? { ...r, points: r.points.map(pt => ({ ...pt })) } : { ...r });
+  }
+  // regionsを書き換える操作の直前に呼び、変更前の状態を1つ保存しておく。
+  // 「最初から」のような全リセットではなく、ひとつ前の状態にだけ戻せるようにするため。
+  function pushUndo(){
+    undoStack.push(cloneRegions(regions));
+    if (undoStack.length > 30) undoStack.shift();
+    updateUndoButton();
+  }
+  function updateUndoButton(){
+    $('btnUndo').disabled = undoStack.length === 0;
+  }
 
   // ---------- モデル読み込み ----------
   // モデル本体(重みファイル)はプロジェクト内の models/ に同梱してあるので、
@@ -219,6 +238,7 @@
     source = off;
     cv.width = off.width; cv.height = off.height;
     regions = []; rawDetections = []; gridTiles = [];
+    undoStack = []; updateUndoButton();
     brushSize = Math.round(Math.min(off.width, off.height) * 0.14);
     $('brushSize').value = brushSize;
     dz.style.display = 'none';
@@ -270,6 +290,7 @@
         new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.2 })
       );
       rawDetections = dets.map(d => ({ x:d.box.x, y:d.box.y, w:d.box.width, h:d.box.height }));
+      pushUndo();
       regions = regions.filter(r => r.manual);
       for (const b of rawDetections){
         regions.push({ ...padBox(b), active:true, manual:false });
@@ -287,6 +308,7 @@
     const manual = regions.filter(r => r.manual);
     const states = regions.filter(r => !r.manual).map(r => r.active);
     const rebuilt = rawDetections.map((b, i) => ({ ...padBox(b), active: states[i] !== undefined ? states[i] : true, manual:false }));
+    pushUndo();
     regions = [...rebuilt, ...manual];
     render();
   }
@@ -412,6 +434,7 @@
   function applyGridRegions(){
     const manual = regions.filter(r => r.manual);
     const rebuilt = gridTiles.map(t => ({ ...t, active: true, manual: false, __grid: true }));
+    pushUndo();
     regions = [...rebuilt, ...manual];
     render();
   }
@@ -750,6 +773,7 @@
       const r = regions[i];
       if (!r.manual){
         if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h){
+          pushUndo();
           r.active = !r.active;
           setStatus(r.active ? 'ぼかしをかけました。' : 'ぼかしを外しました。');
           render();
@@ -762,12 +786,14 @@
         const b = freehandBounds(r);
         const trX = b.x + b.w - hs, trY = b.y;
         if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
+          pushUndo();
           regions.splice(i, 1);
           setStatus('手動の枠を削除しました。');
           render();
           return;
         }
         if (distToPolyline(p.x, p.y, r.points) <= r.brush / 2){
+          pushUndo();
           interaction = { type:'moveFreehand', region:r, startX:p.x, startY:p.y, origPoints:r.points.map(pt => ({...pt})), moved:false };
           cv.setPointerCapture(e.pointerId);
           return;
@@ -777,6 +803,7 @@
       // 手動枠: 削除ボタン(右上) → リサイズハンドル(左上/左下/右下) → 本体の順に判定
       const trX = r.x + r.w - hs, trY = r.y;
       if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
+        pushUndo();
         regions.splice(i, 1);
         setStatus('手動の枠を削除しました。');
         render();
@@ -789,11 +816,13 @@
       ];
       const hit = handles.find(([, hx, hy]) => p.x >= hx && p.x <= hx + hs && p.y >= hy && p.y <= hy + hs);
       if (hit){
+        pushUndo();
         interaction = { type:'resize', region:r, handle:hit[0], orig:{ x:r.x, y:r.y, w:r.w, h:r.h } };
         cv.setPointerCapture(e.pointerId);
         return;
       }
       if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h){
+        pushUndo();
         interaction = { type:'move', region:r, startX:p.x, startY:p.y, orig:{ x:r.x, y:r.y }, moved:false };
         cv.setPointerCapture(e.pointerId);
         return;
@@ -837,6 +866,7 @@
   cv.addEventListener('pointerup', () => {
     if (drawing){
       if (drawing.w > 12 && drawing.h > 12){
+        pushUndo();
         regions.push({ x:drawing.x, y:drawing.y, w:drawing.w, h:drawing.h, active:true, manual:true });
         setStatus('手動の枠を追加しました。続けて別の場所もドラッグできます。終わったら「ドラッグで範囲を指定…」を押すと解除されます。');
       }
@@ -845,6 +875,7 @@
       return;
     }
     if (paintStroke){
+      pushUndo();
       regions.push({ points:paintStroke.points, brush:brushSize, active:true, manual:true, freehand:true });
       setStatus('塗った部分にぼかしを追加しました。続けて他の場所も塗れます。終わったら「指でなぞって塗る」を押すと解除されます。');
       paintStroke = null;
@@ -923,6 +954,7 @@
       setStatus(`Zoomのタイル(${grid.tiles.length}枠)を検出しました。見せたい人のタイルをタップして解除してください。`);
     } else {
       gridTiles = [];
+      pushUndo();
       regions = regions.filter(r => r.manual);
       render();
       setStatus('タイルの区切りを検出できませんでした。集合写真などタイルがない画像は「顔で検出」をお使いください。');
@@ -966,8 +998,18 @@
 
   $('strength').addEventListener('input', e => { strength = +e.target.value; render(); });
 
+  $('btnUndo').addEventListener('click', () => {
+    if (undoStack.length === 0) return;
+    regions = undoStack.pop();
+    updateUndoButton();
+    render();
+    setStatus('ひとつ前の状態に戻しました。');
+  });
+
   $('btnReset').addEventListener('click', () => {
     source = null; regions = []; rawDetections = []; gridTiles = []; drawing = null; paintStroke = null;
+    undoStack = [];
+    updateUndoButton();
     autoMode = 'face';
     setModeButtons();
     setAddMode(false);
