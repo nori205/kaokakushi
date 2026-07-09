@@ -124,12 +124,18 @@
     <div class="seg" role="group" aria-label="加工の種類">
       <button id="effBlur" class="on">ぼかし</button>
       <button id="effMosaic">モザイク</button>
+      <button id="effFill">ベタ塗り</button>
+    </div>
+    <div class="seg" id="fillColorWrap" role="group" aria-label="塗りつぶしの色" style="display:none;">
+      <button id="fillBlack" class="on">黒</button>
+      <button id="fillWhite">白</button>
+      <button id="fillGray">グレー</button>
     </div>
     <div class="seg" role="group" aria-label="ぼかし範囲">
       <button id="rangeFace" class="on">顔まわり</button>
       <button id="rangeWide">大きめ</button>
     </div>
-    <div class="slider-wrap">強さ<input type="range" id="strength" min="4" max="40" value="16"></div>
+    <div class="slider-wrap" id="strengthWrap">強さ<input type="range" id="strength" min="4" max="40" value="16"></div>
     <div class="spacer"></div>
     <button id="btnReset">最初から</button>
     <button id="btnSave" class="primary">画像を保存</button>
@@ -156,7 +162,8 @@
 
   let source = null;              // 正規化済み画像(canvas)
   let regions = [];               // {x,y,w,h,active,manual}
-  let effect = 'blur';            // 'blur' | 'mosaic'
+  let effect = 'blur';            // 'blur' | 'mosaic' | 'fill'
+  let fillColor = '#000000';      // ベタ塗りの色
   let rangeMode = 'face';         // 'face' | 'wide'
   let strength = 16;
   let addMode = false;
@@ -254,9 +261,13 @@
       return;
     }
     try {
+      // inputSize 512/threshold 0.4だと集合写真で顔が近接している場合に
+      // 半分近くを見逃すことが実写真での検証で判明したため、入力解像度を上げ
+      // 閾値を緩めて見逃しを減らす(その分わずかに誤検出は増えうるが、
+      // 「隠し漏れ」より「誤検出でぼかしが増える」方が実害が小さいため許容する)。
       const dets = await faceapi.detectAllFaces(
         source,
-        new faceapi.TinyFaceDetectorOptions({ inputSize: 512, scoreThreshold: 0.4 })
+        new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.2 })
       );
       rawDetections = dets.map(d => ({ x:d.box.x, y:d.box.y, w:d.box.width, h:d.box.height }));
       regions = regions.filter(r => r.manual);
@@ -411,31 +422,98 @@
   }
 
   // ---------- 描画 ----------
-  // ぼかし/モザイクはどちらも「縮小してから拡大する」方式で実装する
-  // (縮小時は補間して平均化 → 拡大時に補間ありなら滑らかな"ぼかし"、補間なしなら
-  // 角がくっきりした"モザイク"になる)。iOS Safariのctx.filter(blur)は
-  // clipとの組み合わせで描画範囲が透明になったり、画像が大きいと無反応になったりする
-  // 既知の不具合があるため、canvasの拡大縮小だけで完結するこの方式に統一している。
-  // ぼかしも縮小率をモザイクと同じスケールにする(上限まで強くしたときに
-  // 顔がわからなくなる程度まで潰す)。ぼかしとモザイクの見た目の違いは
-  // 拡大時の補間の有無だけで作る(補間ありなら滑らか、補間なしならブロック状)。
+  // モザイクは「縮小してから補間なしで拡大する」方式(角がくっきりしたブロック状になる)。
+  // ぼかしは、canvasのネイティブ画像補間(ctx.imageSmoothingEnabled)に頼ると
+  // ブラウザ・GPUにより品質差が大きく、実機検証でiOS Safariでは薄く/ガタついて
+  // 見えることが判明したため、ピクセル配列を直接演算する自前のボックスブラー
+  // (3回がけで疑似ガウシアン)で実装し、どの端末でも同じ結果になるようにする。
   function effectBlock(){
     return Math.max(4, strength);
+  }
+  function blurRadius(){
+    return Math.max(1, Math.round(strength / 2));
+  }
+
+  // 横方向のボックスブラー1回分(端は端のピクセルを繰り返す=edge extend)。
+  // 窓の合計をスライドさせながら計算するので、半径の大小に関わらずO(幅×高さ)で済む。
+  function boxBlurH(src, dst, w, h, r){
+    const size = r * 2 + 1;
+    for (let y = 0; y < h; y++){
+      const row = y * w * 4;
+      let sr = 0, sg = 0, sb = 0, sa = 0;
+      for (let i = -r; i <= r; i++){
+        const xi = i < 0 ? 0 : (i >= w ? w - 1 : i);
+        const idx = row + xi * 4;
+        sr += src[idx]; sg += src[idx+1]; sb += src[idx+2]; sa += src[idx+3];
+      }
+      for (let x = 0; x < w; x++){
+        const idx = row + x * 4;
+        dst[idx] = sr / size; dst[idx+1] = sg / size; dst[idx+2] = sb / size; dst[idx+3] = sa / size;
+        const xOut = Math.max(0, x - r), xIn = Math.min(w - 1, x + r + 1);
+        const idxOut = row + xOut * 4, idxIn = row + xIn * 4;
+        sr += src[idxIn] - src[idxOut]; sg += src[idxIn+1] - src[idxOut+1];
+        sb += src[idxIn+2] - src[idxOut+2]; sa += src[idxIn+3] - src[idxOut+3];
+      }
+    }
+  }
+  function boxBlurV(src, dst, w, h, r){
+    const size = r * 2 + 1;
+    for (let x = 0; x < w; x++){
+      let sr = 0, sg = 0, sb = 0, sa = 0;
+      for (let i = -r; i <= r; i++){
+        const yi = i < 0 ? 0 : (i >= h ? h - 1 : i);
+        const idx = (yi * w + x) * 4;
+        sr += src[idx]; sg += src[idx+1]; sb += src[idx+2]; sa += src[idx+3];
+      }
+      for (let y = 0; y < h; y++){
+        const idx = (y * w + x) * 4;
+        dst[idx] = sr / size; dst[idx+1] = sg / size; dst[idx+2] = sb / size; dst[idx+3] = sa / size;
+        const yOut = Math.max(0, y - r), yIn = Math.min(h - 1, y + r + 1);
+        const idxOut = (yOut * w + x) * 4, idxIn = (yIn * w + x) * 4;
+        sr += src[idxIn] - src[idxOut]; sg += src[idxIn+1] - src[idxOut+1];
+        sb += src[idxIn+2] - src[idxOut+2]; sa += src[idxIn+3] - src[idxOut+3];
+      }
+    }
+  }
+  // 3回連続でボックスブラーをかけるとガウシアンぼかしにかなり近い見た目になる
+  // (よく知られた近似手法)。
+  function gaussianBlurData(data, w, h, radius){
+    let cur = data;
+    for (let pass = 0; pass < 3; pass++){
+      const tmp = new Uint8ClampedArray(cur.length);
+      boxBlurH(cur, tmp, w, h, radius);
+      const out = new Uint8ClampedArray(cur.length);
+      boxBlurV(tmp, out, w, h, radius);
+      cur = out;
+    }
+    return cur;
   }
 
   function drawEffect(r){
     if (r.freehand){ drawFreehandEffect(r); return; }
     const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h);
     if (w < 2 || h < 2) return;
-    const isBlur = effect === 'blur';
+    if (effect === 'fill'){
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(x, y, w, h);
+      return;
+    }
+    if (effect === 'blur'){
+      const sctx = source.getContext('2d');
+      const imgData = sctx.getImageData(x, y, w, h);
+      const blurred = gaussianBlurData(imgData.data, w, h, blurRadius());
+      ctx.putImageData(new ImageData(blurred, w, h), x, y);
+      return;
+    }
     const block = effectBlock();
     const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
     const off = drawEffect._off || (drawEffect._off = document.createElement('canvas'));
     off.width = sw; off.height = sh;
     const octx = off.getContext('2d');
     octx.imageSmoothingEnabled = true;
+    octx.imageSmoothingQuality = 'high';
     octx.drawImage(source, x, y, w, h, 0, 0, sw, sh);
-    ctx.imageSmoothingEnabled = isBlur;
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(off, 0, 0, sw, sh, x, y, w, h);
     ctx.imageSmoothingEnabled = true;
   }
@@ -446,19 +524,29 @@
   let effCanvasCache = null;
   function getFullEffectCanvas(){
     if (effCanvasCache) return effCanvasCache;
-    const isBlur = effect === 'blur';
-    const block = effectBlock();
     const eff = drawFreehandEffect._eff || (drawFreehandEffect._eff = document.createElement('canvas'));
     eff.width = source.width; eff.height = source.height;
     const ectx = eff.getContext('2d');
     ectx.clearRect(0, 0, eff.width, eff.height);
+
+    if (effect === 'blur'){
+      const sctx = source.getContext('2d');
+      const imgData = sctx.getImageData(0, 0, source.width, source.height);
+      const blurred = gaussianBlurData(imgData.data, source.width, source.height, blurRadius());
+      ectx.putImageData(new ImageData(blurred, source.width, source.height), 0, 0);
+      effCanvasCache = eff;
+      return eff;
+    }
+
+    const block = effectBlock();
     const sw = Math.max(1, Math.round(source.width / block)), sh = Math.max(1, Math.round(source.height / block));
     const off = drawFreehandEffect._off || (drawFreehandEffect._off = document.createElement('canvas'));
     off.width = sw; off.height = sh;
     const octx = off.getContext('2d');
     octx.imageSmoothingEnabled = true;
+    octx.imageSmoothingQuality = 'high';
     octx.drawImage(source, 0, 0, sw, sh);
-    ectx.imageSmoothingEnabled = isBlur;
+    ectx.imageSmoothingEnabled = false;
     ectx.drawImage(off, 0, 0, sw, sh, 0, 0, eff.width, eff.height);
     ectx.imageSmoothingEnabled = true;
     effCanvasCache = eff;
@@ -478,13 +566,17 @@
 
   function drawFreehandEffect(r){
     if (!r.points || r.points.length === 0) return;
-    const eff = getFullEffectCanvas();
     ctx.save();
     strokePathFor(ctx, r.points);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = r.brush;
-    ctx.strokeStyle = ctx.createPattern(eff, 'no-repeat');
+    if (effect === 'fill'){
+      ctx.strokeStyle = fillColor;
+    } else {
+      const eff = getFullEffectCanvas();
+      ctx.strokeStyle = ctx.createPattern(eff, 'no-repeat');
+    }
     ctx.stroke();
     ctx.restore();
   }
@@ -837,16 +929,25 @@
     }
   });
 
-  $('effBlur').addEventListener('click', () => {
-    effect = 'blur';
-    $('effBlur').classList.add('on'); $('effMosaic').classList.remove('on');
-    render();
-  });
-  $('effMosaic').addEventListener('click', () => {
-    effect = 'mosaic';
-    $('effMosaic').classList.add('on'); $('effBlur').classList.remove('on');
-    render();
-  });
+  function setEffectButtons(){
+    $('effBlur').classList.toggle('on', effect === 'blur');
+    $('effMosaic').classList.toggle('on', effect === 'mosaic');
+    $('effFill').classList.toggle('on', effect === 'fill');
+    $('fillColorWrap').style.display = effect === 'fill' ? 'flex' : 'none';
+    $('strengthWrap').style.display = effect === 'fill' ? 'none' : 'flex';
+  }
+  $('effBlur').addEventListener('click', () => { effect = 'blur'; setEffectButtons(); render(); });
+  $('effMosaic').addEventListener('click', () => { effect = 'mosaic'; setEffectButtons(); render(); });
+  $('effFill').addEventListener('click', () => { effect = 'fill'; setEffectButtons(); render(); });
+
+  function setFillColorButtons(){
+    $('fillBlack').classList.toggle('on', fillColor === '#000000');
+    $('fillWhite').classList.toggle('on', fillColor === '#FFFFFF');
+    $('fillGray').classList.toggle('on', fillColor === '#808080');
+  }
+  $('fillBlack').addEventListener('click', () => { fillColor = '#000000'; setFillColorButtons(); render(); });
+  $('fillWhite').addEventListener('click', () => { fillColor = '#FFFFFF'; setFillColorButtons(); render(); });
+  $('fillGray').addEventListener('click', () => { fillColor = '#808080'; setFillColorButtons(); render(); });
 
   $('rangeFace').addEventListener('click', () => {
     rangeMode = 'face';
