@@ -147,7 +147,7 @@
   <div id="stage">
     <div id="hint">ぼかしを<b>外したい人をタップ</b>してください(もう一度タップで元に戻ります)</div>
     <div id="canvasWrap"><canvas id="cv"></canvas></div>
-    <p id="legend"><span class="c1">点線=ぼかし中</span> / <span class="c2">実線=表示中</span> / 手動枠は右上の✕で削除</p>
+    <p id="legend"><span class="c1">点線=ぼかし中</span> / <span class="c2">実線=表示中</span> / 手動枠は選ぶと右上に✕・調整ハンドルが出ます</p>
     <p id="status"></p>
   </div>
 </main>
@@ -180,6 +180,7 @@
   let autoMode = 'face';          // 'face' | 'grid'
   let gridTiles = [];             // 検出済みZoomタイル(生の矩形)
   let undoStack = [];             // regionsのスナップショット履歴(「戻す」ボタン用)
+  let selectedRegion = null;      // 削除✕・リサイズハンドルを表示中の手動/フリーハンド枠
 
   function setStatus(msg){ statusEl.textContent = msg; }
 
@@ -238,7 +239,7 @@
     source = off;
     cv.width = off.width; cv.height = off.height;
     regions = []; rawDetections = []; gridTiles = [];
-    undoStack = []; updateUndoButton();
+    undoStack = []; selectedRegion = null; updateUndoButton();
     brushSize = Math.round(Math.min(off.width, off.height) * 0.14);
     $('brushSize').value = brushSize;
     dz.style.display = 'none';
@@ -698,18 +699,20 @@
         ctx.stroke();
         ctx.restore();
 
-        const b = freehandBounds(r);
-        const bx = b.x + b.w - hs, by = b.y;
-        ctx.save();
-        ctx.fillStyle = 'rgba(23,24,28,.85)';
-        ctx.fillRect(bx, by, hs, hs);
-        ctx.strokeStyle = 'rgba(244,242,237,.8)'; ctx.lineWidth = Math.max(1.5, hs / 12);
-        const pad = hs * 0.28;
-        ctx.beginPath();
-        ctx.moveTo(bx + pad, by + pad); ctx.lineTo(bx + hs - pad, by + hs - pad);
-        ctx.moveTo(bx + hs - pad, by + pad); ctx.lineTo(bx + pad, by + hs - pad);
-        ctx.stroke();
-        ctx.restore();
+        if (r === selectedRegion){
+          const b = freehandBounds(r);
+          const bx = b.x + b.w - hs, by = b.y;
+          ctx.save();
+          ctx.fillStyle = 'rgba(23,24,28,.85)';
+          ctx.fillRect(bx, by, hs, hs);
+          ctx.strokeStyle = 'rgba(244,242,237,.8)'; ctx.lineWidth = Math.max(1.5, hs / 12);
+          const pad = hs * 0.28;
+          ctx.beginPath();
+          ctx.moveTo(bx + pad, by + pad); ctx.lineTo(bx + hs - pad, by + hs - pad);
+          ctx.moveTo(bx + hs - pad, by + pad); ctx.lineTo(bx + pad, by + hs - pad);
+          ctx.stroke();
+          ctx.restore();
+        }
         continue;
       }
 
@@ -719,7 +722,7 @@
       else { ctx.strokeStyle = 'rgba(126,210,180,.95)'; ctx.setLineDash([]); }
       ctx.strokeRect(r.x, r.y, r.w, r.h);
       ctx.restore();
-      if (r.manual){
+      if (r.manual && r === selectedRegion){
         const bx = r.x + r.w - hs, by = r.y;
         ctx.save();
         ctx.fillStyle = 'rgba(23,24,28,.85)';
@@ -755,20 +758,36 @@
     };
   }
 
+  // 2本指ピンチズーム中に、2本目の指がドラッグ操作(手動追加/塗り)として
+  // 誤処理されないようにする(1本指=描画、2本指=ブラウザのピンチズームに委ねる)。
+  let activePointers = new Set();
   cv.addEventListener('pointerdown', e => {
     if (!source) return;
+    activePointers.add(e.pointerId);
+    if (activePointers.size > 1){
+      // 2本目の指が触れた=ピンチズームとみなし、進行中の描画は破棄してブラウザに譲る
+      drawing = null; paintStroke = null; interaction = null;
+      render();
+      return;
+    }
     const p = toImageXY(e);
     if (addMode){
+      if (selectedRegion){ selectedRegion = null; render(); }
       drawing = { x:p.x, y:p.y, w:0, h:0, sx:p.x, sy:p.y };
       cv.setPointerCapture(e.pointerId);
       return;
     }
     if (paintMode){
+      if (selectedRegion){ selectedRegion = null; render(); }
       paintStroke = { points: [{ x:p.x, y:p.y }] };
       cv.setPointerCapture(e.pointerId);
       return;
     }
     const hs = handleSize();
+    // 削除✕・リサイズ丸ハンドルは普段は隠しておき、選択中の枠だけに表示する。
+    // (触るとその枠が選択され、他をタップすると選択解除されてハンドルが消える)
+    const prevSelected = selectedRegion;
+    selectedRegion = null;
     for (let i = regions.length - 1; i >= 0; i--){
       const r = regions[i];
       if (!r.manual){
@@ -782,17 +801,20 @@
         continue;
       }
       if (r.freehand){
-        // フリーハンド枠: 削除ボタン(右上、外接矩形基準) → 線に触れていれば移動/タップの順に判定
-        const b = freehandBounds(r);
-        const trX = b.x + b.w - hs, trY = b.y;
-        if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
-          pushUndo();
-          regions.splice(i, 1);
-          setStatus('手動の枠を削除しました。');
-          render();
-          return;
+        // フリーハンド枠: 選択中なら削除ボタン(右上、外接矩形基準) → 線に触れていれば選択して移動/タップの順に判定
+        if (r === prevSelected){
+          const b = freehandBounds(r);
+          const trX = b.x + b.w - hs, trY = b.y;
+          if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
+            pushUndo();
+            regions.splice(i, 1);
+            setStatus('手動の枠を削除しました。');
+            render();
+            return;
+          }
         }
         if (distToPolyline(p.x, p.y, r.points) <= r.brush / 2){
+          selectedRegion = r;
           pushUndo();
           interaction = { type:'moveFreehand', region:r, startX:p.x, startY:p.y, origPoints:r.points.map(pt => ({...pt})), moved:false };
           cv.setPointerCapture(e.pointerId);
@@ -800,34 +822,39 @@
         }
         continue;
       }
-      // 手動枠: 削除ボタン(右上) → リサイズハンドル(左上/左下/右下) → 本体の順に判定
-      const trX = r.x + r.w - hs, trY = r.y;
-      if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
-        pushUndo();
-        regions.splice(i, 1);
-        setStatus('手動の枠を削除しました。');
-        render();
-        return;
-      }
-      const handles = [
-        ['tl', r.x, r.y],
-        ['bl', r.x, r.y + r.h - hs],
-        ['br', r.x + r.w - hs, r.y + r.h - hs]
-      ];
-      const hit = handles.find(([, hx, hy]) => p.x >= hx && p.x <= hx + hs && p.y >= hy && p.y <= hy + hs);
-      if (hit){
-        pushUndo();
-        interaction = { type:'resize', region:r, handle:hit[0], orig:{ x:r.x, y:r.y, w:r.w, h:r.h } };
-        cv.setPointerCapture(e.pointerId);
-        return;
+      // 手動枠: 選択中なら削除ボタン(右上)→リサイズハンドル(左上/左下/右下)を判定、その後に本体の順に判定
+      if (r === prevSelected){
+        const trX = r.x + r.w - hs, trY = r.y;
+        if (p.x >= trX && p.x <= trX + hs && p.y >= trY && p.y <= trY + hs){
+          pushUndo();
+          regions.splice(i, 1);
+          setStatus('手動の枠を削除しました。');
+          render();
+          return;
+        }
+        const handles = [
+          ['tl', r.x, r.y],
+          ['bl', r.x, r.y + r.h - hs],
+          ['br', r.x + r.w - hs, r.y + r.h - hs]
+        ];
+        const hit = handles.find(([, hx, hy]) => p.x >= hx && p.x <= hx + hs && p.y >= hy && p.y <= hy + hs);
+        if (hit){
+          selectedRegion = r;
+          pushUndo();
+          interaction = { type:'resize', region:r, handle:hit[0], orig:{ x:r.x, y:r.y, w:r.w, h:r.h } };
+          cv.setPointerCapture(e.pointerId);
+          return;
+        }
       }
       if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h){
+        selectedRegion = r;
         pushUndo();
         interaction = { type:'move', region:r, startX:p.x, startY:p.y, orig:{ x:r.x, y:r.y }, moved:false };
         cv.setPointerCapture(e.pointerId);
         return;
       }
     }
+    if (prevSelected) render(); // 何もヒットしなかった=空白タップ → 選択解除を反映
   });
 
   cv.addEventListener('pointermove', e => {
@@ -863,11 +890,14 @@
     render();
   });
 
-  cv.addEventListener('pointerup', () => {
+  cv.addEventListener('pointerup', e => {
+    activePointers.delete(e.pointerId);
     if (drawing){
       if (drawing.w > 12 && drawing.h > 12){
         pushUndo();
-        regions.push({ x:drawing.x, y:drawing.y, w:drawing.w, h:drawing.h, active:true, manual:true });
+        const region = { x:drawing.x, y:drawing.y, w:drawing.w, h:drawing.h, active:true, manual:true };
+        regions.push(region);
+        selectedRegion = region; // 追加直後は微調整しやすいようハンドルを出しておく
         setStatus('手動の枠を追加しました。続けて別の場所もドラッグできます。終わったら「ドラッグで範囲を指定…」を押すと解除されます。');
       }
       drawing = null;
@@ -876,7 +906,9 @@
     }
     if (paintStroke){
       pushUndo();
-      regions.push({ points:paintStroke.points, brush:brushSize, active:true, manual:true, freehand:true });
+      const region = { points:paintStroke.points, brush:brushSize, active:true, manual:true, freehand:true };
+      regions.push(region);
+      selectedRegion = region;
       setStatus('塗った部分にぼかしを追加しました。続けて他の場所も塗れます。終わったら「指でなぞって塗る」を押すと解除されます。');
       paintStroke = null;
       render();
@@ -898,15 +930,25 @@
     }
   });
 
+  // ピンチズームの途中でブラウザが指の追跡を打ち切ると pointerup ではなく
+  // pointercancel が飛んでくることがある(特にiOS Safari)。取りこぼすと
+  // activePointersが残り続けて1本指扱いに戻れなくなるため、同様に後始末する。
+  cv.addEventListener('pointercancel', e => {
+    activePointers.delete(e.pointerId);
+    drawing = null; paintStroke = null; interaction = null;
+  });
+
   // ---------- ツールバー ----------
   function setAddMode(on){
     addMode = on;
     if (on) setPaintMode(false);
     $('btnAdd').classList.toggle('active-mode', on);
     $('btnAdd').textContent = on ? 'ドラッグで範囲を指定…' : '＋ 手動で四角を追加';
-    cv.style.touchAction = (on || paintMode) ? 'none' : 'manipulation';
+    // 1本指のドラッグは自前の範囲指定に使うのでブラウザのパン(スクロール)は止めるが、
+    // 2本指のピンチズームは許可する(スマホで拡大してから細かく囲みたいという要望のため)。
+    cv.style.touchAction = (on || paintMode) ? 'pinch-zoom' : 'manipulation';
     cv.style.cursor = on ? 'crosshair' : 'pointer';
-    if (on) setStatus('隠したい範囲を、指(マウス)を押したまま囲むようにドラッグしてください。');
+    if (on) setStatus('隠したい範囲を、指(マウス)を押したまま囲むようにドラッグしてください。2本指でピンチすると拡大できます。');
   }
   function setPaintMode(on){
     paintMode = on;
@@ -914,9 +956,9 @@
     $('btnPaint').classList.toggle('active-mode', on);
     $('btnPaint').textContent = on ? '指でなぞって塗る中…' : '🖌 指でなぞって塗る';
     $('brushWrap').style.display = on ? 'flex' : 'none';
-    cv.style.touchAction = (on || addMode) ? 'none' : 'manipulation';
+    cv.style.touchAction = (on || addMode) ? 'pinch-zoom' : 'manipulation';
     cv.style.cursor = on ? 'crosshair' : 'pointer';
-    if (on) setStatus('隠したい部分を、指(マウス)を押したままなぞってください。');
+    if (on) setStatus('隠したい部分を、指(マウス)を押したままなぞってください。2本指でピンチすると拡大できます。');
   }
   $('btnAdd').addEventListener('click', () => setAddMode(!addMode));
   $('btnPaint').addEventListener('click', () => setPaintMode(!paintMode));
@@ -1001,6 +1043,7 @@
   $('btnUndo').addEventListener('click', () => {
     if (undoStack.length === 0) return;
     regions = undoStack.pop();
+    selectedRegion = null;
     updateUndoButton();
     render();
     setStatus('ひとつ前の状態に戻しました。');
@@ -1009,6 +1052,7 @@
   $('btnReset').addEventListener('click', () => {
     source = null; regions = []; rawDetections = []; gridTiles = []; drawing = null; paintStroke = null;
     undoStack = [];
+    selectedRegion = null;
     updateUndoButton();
     autoMode = 'face';
     setModeButtons();
