@@ -157,7 +157,7 @@
   <div id="stage">
     <div id="hint">ぼかしを<b>外したい人をタップ</b>してください(もう一度タップで元に戻ります)</div>
     <div id="canvasWrap"><canvas id="cv"></canvas></div>
-    <p id="legend"><span class="c1">点線=ぼかし中</span> / <span class="c2">実線=表示中</span> / 枠を選ぶと右上に✕(削除)が出ます。手動枠はさらに調整ハンドルも出ます</p>
+    <p id="legend"><span class="c1">点線=ぼかし中</span> / <span class="c2">実線=表示中</span> / 枠を選ぶと右上に✕(削除)・角に○(サイズ調整)が出ます</p>
     <p id="status"></p>
   </div>
 </main>
@@ -165,7 +165,7 @@
 <footer>
   <b>プライバシーについて:</b> このツールはブラウザ内だけで動作し、画像がサーバーに送信されることはありません。<br>
   自動検出は横顔・小さい顔などを見逃すことがあります。保存前に隠し漏れがないか必ず確認してください。<br>
-  <span id="buildStamp" style="opacity:.6;">build: 2026-08-03 14:36</span>
+  <span id="buildStamp" style="opacity:.6;">build: 2026-08-03 14:52</span>
 </footer>
 
 <div id="updateBanner">
@@ -771,18 +771,17 @@
         ctx.stroke();
         ctx.restore();
 
-        // リサイズ用ハンドル(左上・左下・右下の3角、右上は削除ボタンなので除く)は
-        // 位置・サイズを自由に動かせる手動枠だけに出す
-        if (r.manual){
-          for (const [hx, hy] of [[r.x, r.y], [r.x, r.y + r.h - hs], [r.x + r.w - hs, r.y + r.h - hs]]){
-            ctx.save();
-            const cx = hx + hs / 2, cy = hy + hs / 2;
-            ctx.fillStyle = 'rgba(23,24,28,.85)';
-            ctx.beginPath(); ctx.arc(cx, cy, hs / 2, 0, Math.PI * 2); ctx.fill();
-            ctx.strokeStyle = 'rgba(244,242,237,.9)'; ctx.lineWidth = Math.max(1.5, hs / 10);
-            ctx.beginPath(); ctx.arc(cx, cy, hs * 0.32, 0, Math.PI * 2); ctx.stroke();
-            ctx.restore();
-          }
+        // リサイズ用ハンドル(左上・左下・右下の3角、右上は削除ボタンなので除く)。
+        // 自動検出の枠も、選択中ならケーキなど消したくない部分を避けられるよう
+        // ドラッグでサイズ調整できるようにする(掴んだ時点で手動枠に昇格する)。
+        for (const [hx, hy] of [[r.x, r.y], [r.x, r.y + r.h - hs], [r.x + r.w - hs, r.y + r.h - hs]]){
+          ctx.save();
+          const cx = hx + hs / 2, cy = hy + hs / 2;
+          ctx.fillStyle = 'rgba(23,24,28,.85)';
+          ctx.beginPath(); ctx.arc(cx, cy, hs / 2, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(244,242,237,.9)'; ctx.lineWidth = Math.max(1.5, hs / 10);
+          ctx.beginPath(); ctx.arc(cx, cy, hs * 0.32, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
         }
       }
     }
@@ -829,6 +828,23 @@
             regions.splice(i, 1);
             setStatus('検出枠を削除しました。「＋手動で四角を追加」などで引き直せます。');
             render();
+            return;
+          }
+          // リサイズハンドルを掴んだら手動枠に昇格させてからリサイズを開始する。
+          // (昇格させないと、再検出やパディング設定変更のたびに検出結果から
+          // 枠が再計算され、せっかく調整したサイズが上書きされてしまうため)
+          const handles = [
+            ['tl', r.x, r.y],
+            ['bl', r.x, r.y + r.h - hs],
+            ['br', r.x + r.w - hs, r.y + r.h - hs]
+          ];
+          const hit = handles.find(([, hx, hy]) => p.x >= hx && p.x <= hx + hs && p.y >= hy && p.y <= hy + hs);
+          if (hit){
+            pushUndo();
+            r.manual = true;
+            selectedRegion = r;
+            interaction = { type:'resize', region:r, handle:hit[0], orig:{ x:r.x, y:r.y, w:r.w, h:r.h } };
+            cv.setPointerCapture(e.pointerId);
             return;
           }
         }
