@@ -302,9 +302,11 @@
       // 半分近くを見逃すことが実写真での検証で判明したため、入力解像度を上げ
       // 閾値を緩めて見逃しを減らす(その分わずかに誤検出は増えうるが、
       // 「隠し漏れ」より「誤検出でぼかしが増える」方が実害が小さいため許容する)。
+      // さらに18人規模の横長集合写真では608でも一人ひとりの顔が数px単位まで
+      // 縮んでしまい検出が全滅することが判明したため896まで引き上げる。
       const dets = await faceapi.detectAllFaces(
         source,
-        new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.2 })
+        new faceapi.TinyFaceDetectorOptions({ inputSize: 896, scoreThreshold: 0.2 })
       );
       rawDetections = dets.map(d => ({ x:d.box.x, y:d.box.y, w:d.box.width, h:d.box.height }));
       pushUndo();
