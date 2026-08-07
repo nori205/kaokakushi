@@ -165,7 +165,7 @@
 <footer>
   <b>プライバシーについて:</b> このツールはブラウザ内だけで動作し、画像がサーバーに送信されることはありません。<br>
   自動検出は横顔・小さい顔などを見逃すことがあります。保存前に隠し漏れがないか必ず確認してください。<br>
-  <span id="buildStamp" style="opacity:.6;">build: 2026-08-03 14:52</span>
+  <span id="buildStamp" style="opacity:.6;">build: 2026-08-07 14:09</span>
 </footer>
 
 <div id="updateBanner">
@@ -698,7 +698,19 @@
     effCanvasCache = null; // ぼかし/モザイクの元画像はrenderのたびに作り直す(強さ変更などに追従するため)
     ctx.clearRect(0, 0, cv.width, cv.height);
     ctx.drawImage(source, 0, 0);
-    for (const r of regions){ if (r.active) drawEffect(r); }
+    // 1枠のぼかし処理で例外が起きても他の枠が巻き込まれて未ぼかしのまま
+    // 残らないよう、枠ごとに個別に保護する(実機でのみ起きる原因不明のエラーで
+    // 「誰一人ぼかされない」事態を避けるため)。エラー内容は画面下部に出し、
+    // 次回同じ不具合が起きた時に原因を特定できるようにする。
+    let effectError = null;
+    for (const r of regions){
+      if (!r.active) continue;
+      try { drawEffect(r); }
+      catch(e){ effectError = e; }
+    }
+    if (effectError){
+      setStatus(`一部の枠でぼかし処理に失敗しました(${effectError.message || effectError})。この画面のスクリーンショットを送ってください。`);
+    }
 
     if (drawing){
       ctx.save();
